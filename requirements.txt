@@ -1,0 +1,44 @@
+# Igland Bros Quotation Application
+# Pinned so the Streamlit Community Cloud image matches local development.
+# Verified installing cleanly on Python 3.14.5 (local) — all wheels also publish
+# cp313 builds, which is what Community Cloud runs. See docs/PHASE1_ARCHITECTURE.md §11.1.
+
+# --- UI -------------------------------------------------------------------
+streamlit==1.60.0
+plotly==6.9.0
+
+# --- Data / persistence ---------------------------------------------------
+SQLAlchemy==2.0.51
+alembic==1.18.5
+psycopg[binary]==3.3.4          # PostgreSQL driver (production)
+pandas==3.0.5
+openpyxl==3.1.5                 # .xlsx reading (price-list import)
+XlsxWriter==3.2.9               # .xlsx writing (report exports)
+
+# --- Validation / config --------------------------------------------------
+pydantic==2.13.4
+pydantic-settings==2.14.2
+python-dotenv==1.2.2
+
+# --- Security -------------------------------------------------------------
+# bcrypt is used directly rather than via passlib: passlib 1.7.4 is unmaintained
+# and probes bcrypt.__about__.__version__, which bcrypt >= 4.1 removed.
+bcrypt==5.0.0
+
+# --- Documents ------------------------------------------------------------
+# Quotations export as either PDF or Word, chosen by the employee at download
+# time. Both renderers consume the same document model so the two outputs
+# cannot drift apart. Both are pure-Python wheels and work on Windows and on
+# the Linux image Community Cloud runs.
+reportlab==5.0.0
+python-docx==1.2.0
+
+# --- Object storage (Community Cloud has an ephemeral filesystem) ---------
+boto3==1.43.62                  # S3-compatible: Supabase Storage, R2, S3
+
+# --- Testing --------------------------------------------------------------
+pytest==9.1.1
+# Used only by the tests, to read back generated PDFs and assert on their text
+# — that the totals appear, that the DRAFT mark is present or absent, and that
+# no cost or margin figure leaked into a customer document.
+pypdf==6.14.2

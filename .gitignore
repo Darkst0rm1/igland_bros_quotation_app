@@ -1,0 +1,38 @@
+# --- Secrets: never commit -------------------------------------------------
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# --- Local database --------------------------------------------------------
+# The -wal and -shm sidecars matter: database.py enables WAL mode, so they hold
+# committed data that has not yet been checkpointed into the .db file.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# --- Runtime storage (durable copies live in object storage in production) --
+uploads/
+generated_quotes/
+!uploads/.gitkeep
+
+# --- Python ----------------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- Editors / OS ----------------------------------------------------------
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
