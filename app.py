@@ -31,7 +31,7 @@ from modules.authentication import (
 )
 from modules.config import get_settings
 from modules.constants import Perm
-from modules.database import schema_revisions, session_scope
+from modules.database import reset_engine_cache, schema_revisions, session_scope
 from modules.session import (
     clear_session,
     current_user,
@@ -53,25 +53,70 @@ st.set_page_config(
 # Startup checks
 # --------------------------------------------------------------------------- #
 
-@st.cache_resource(show_spinner=False)
+def _database_identity() -> str:
+    """Which database this process is actually talking to, without credentials.
+
+    Printed on the failure screen. Without it, "the database has no schema" is
+    ambiguous between *the configured database is empty* and *no configuration
+    was found, so it fell back to SQLite* — which look identical from the
+    outside and have completely different fixes.
+    """
+    from sqlalchemy.engine import make_url
+
+    try:
+        url = make_url(get_settings().database_url)
+    except Exception:  # noqa: BLE001
+        return "unreadable"
+    if url.drivername.startswith("sqlite"):
+        return f"sqlite (file: {url.database or ':memory:'})"
+    return f"{url.drivername} on {url.host or '?'}/{url.database or '?'}"
+
+
 def _startup_check() -> tuple[bool, str | None]:
-    """Verify the database schema matches this code. Runs once per process."""
+    """Verify the database schema matches this code.
+
+    Deliberately **not** wrapped in ``st.cache_resource``. Caching here would
+    also cache a *failure*, and a failure is precisely the state an operator is
+    about to fix by editing the secrets — a cached one can only be cleared by a
+    full redeploy, which makes the app look broken after it has been corrected.
+
+    Success is remembered in session state so the query does not repeat on every
+    rerun; failure re-evaluates, and drops the settings and engine caches first
+    so a corrected secret is picked up on the next page load.
+    """
+    if st.session_state.get("_schema_verified"):
+        return True, None
+
     settings = get_settings()
     applied, expected = schema_revisions()
+    where = _database_identity()
 
+    problem: str | None = None
     if applied is None:
-        return False, (
-            "The database has no schema yet. Apply the migrations before starting:\n\n"
+        problem = (
+            f"The database has no schema yet.\n\n"
+            f"**Connected to:** `{where}`\n\n"
+            "If that is not the database you expect, the `DATABASE_URL` secret is "
+            "not being read. Otherwise apply the migrations:\n\n"
             "```\nalembic upgrade head\npython -m seeds.bootstrap\n```"
         )
-    if expected is not None and applied != expected:
-        return False, (
+    elif expected is not None and applied != expected:
+        problem = (
             f"The database schema is at revision `{applied}` but this code expects "
-            f"`{expected}`.\n\nApply the outstanding migrations:\n\n"
-            "```\nalembic upgrade head\n```"
+            f"`{expected}`.\n\n**Connected to:** `{where}`\n\n"
+            "Apply the outstanding migrations:\n\n```\nalembic upgrade head\n```"
         )
-    log.info("Startup OK (env=%s, schema=%s)", settings.app_env, applied)
-    return True, None
+
+    if problem is None:
+        st.session_state["_schema_verified"] = True
+        log.info("Startup OK (env=%s, schema=%s, db=%s)", settings.app_env, applied, where)
+        return True, None
+
+    # Drop the cached settings and engine so an edited secret takes effect on
+    # the next run rather than requiring a redeploy.
+    reset_engine_cache()
+    log.warning("Startup check failed against %s: %s", where, problem.splitlines()[0])
+    return False, problem
 
 
 # --------------------------------------------------------------------------- #
@@ -252,23 +297,57 @@ def render_sidebar_identity(user) -> bool:  # noqa: ANN001
 # Main
 # --------------------------------------------------------------------------- #
 
+def _run_standalone(render, title: str) -> None:  # noqa: ANN001
+    """Render a single screen with the page menu hidden.
+
+    Streamlit falls back to auto-discovering the ``pages/`` directory whenever
+    ``st.navigation`` is not called. Returning early from ``main()`` — which is
+    what the startup-error, login and change-password screens all do — therefore
+    used to leave the sidebar listing every page in the application to someone
+    who has not signed in. The pages defend themselves (each calls
+    ``require_page``), but advertising the whole menu to an anonymous visitor is
+    not something to leave in place.
+
+    Registering exactly one hidden page keeps ``st.navigation`` in control on
+    every path through this function.
+    """
+    st.navigation([st.Page(render, title=title)], position="hidden").run()
+
+
 def main() -> None:
     healthy, problem = _startup_check()
     if not healthy:
-        st.error("The application cannot start.")
-        st.markdown(problem or "")
-        st.stop()
+        def _startup_error() -> None:
+            st.error("The application cannot start.")
+            st.markdown(problem or "")
+
+        _run_standalone(_startup_error, "Igland Bros")
+        return
 
     # Every st.rerun() in this application is issued here, at the top level of
     # the script, never from inside a column, form or sidebar context.
     user = current_user()
     if user is None:
-        if render_login():
+        signed_in = False
+
+        def _login() -> None:
+            nonlocal signed_in
+            signed_in = render_login()
+
+        _run_standalone(_login, "Sign in")
+        if signed_in:
             st.rerun()
         return
 
     if user.must_change_password:
-        if render_forced_password_change(user):
+        finished = False
+
+        def _change_password() -> None:
+            nonlocal finished
+            finished = render_forced_password_change(user)
+
+        _run_standalone(_change_password, "Change your password")
+        if finished:
             st.rerun()
         return
 

@@ -48,6 +48,48 @@ class TestStartup:
     def test_the_login_screen_states_that_it_is_internal_only(self):
         assert "Customers do not have" in _text(_run())
 
+    def test_a_failed_startup_check_is_not_cached(self, engine):
+        """The failure state is exactly what an operator is about to fix by
+        editing the secrets. Caching it would mean the app still reports the
+        old problem after the fix, recoverable only by a full redeploy."""
+        from modules.database import Base
+
+        Base.metadata.drop_all(engine)
+        with engine.begin() as conn:
+            from sqlalchemy import text
+
+            conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+
+        broken = _run()
+        assert any("cannot start" in e.value for e in broken.error)
+
+        # Restore the schema, exactly as applying the migration would.
+        Base.metadata.create_all(engine)
+        from tests.conftest import _stamp_alembic_head
+
+        _stamp_alembic_head(engine)
+
+        # A fresh run must recover without a process restart.
+        recovered = _run()
+        assert not recovered.error
+        assert any("Username or email" == i.label for i in recovered.text_input)
+
+    def test_the_failure_names_the_database_it_reached(self, engine):
+        """'No schema' is ambiguous between an empty database and a missing
+        DATABASE_URL falling back to SQLite. The message must distinguish them."""
+        from sqlalchemy import text
+
+        from modules.database import Base
+
+        Base.metadata.drop_all(engine)
+        with engine.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+
+        app = _run()
+        rendered = _text(app)
+        assert "Connected to:" in rendered
+        assert "sqlite" in rendered
+
     def test_no_page_content_leaks_before_sign_in(self):
         """The gate must run before any page module does."""
         rendered = _text(_run())
