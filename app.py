@@ -29,7 +29,7 @@ from modules.authentication import (
     change_password,
     logout,
 )
-from modules.config import get_settings
+from modules.config import get_settings, secrets_status
 from modules.constants import Perm
 from modules.database import reset_engine_cache, schema_revisions, session_scope
 from modules.session import (
@@ -96,8 +96,10 @@ def _startup_check() -> tuple[bool, str | None]:
         problem = (
             f"The database has no schema yet.\n\n"
             f"**Connected to:** `{where}`\n\n"
-            "If that is not the database you expect, the `DATABASE_URL` secret is "
-            "not being read. Otherwise apply the migrations:\n\n"
+            f"**Secrets:** `{secrets_status()}`\n\n"
+            "If the database above is not the one you expect, the `DATABASE_URL` "
+            "secret is not reaching the application — the Secrets line tells you "
+            "what was actually found. Otherwise apply the migrations:\n\n"
             "```\nalembic upgrade head\npython -m seeds.bootstrap\n```"
         )
     elif expected is not None and applied != expected:

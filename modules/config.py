@@ -31,6 +31,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env", override=False)
 
 
+#: Why the last attempt to read st.secrets turned out the way it did. Recorded
+#: because a silent fallback to defaults is indistinguishable from a correctly
+#: configured app, and that ambiguity is expensive to debug from the outside.
+_SECRETS_STATUS: str = "not attempted"
+
+
 def _streamlit_secrets() -> dict[str, Any]:
     """Return st.secrets as a plain dict, or {} when unavailable.
 
@@ -38,13 +44,40 @@ def _streamlit_secrets() -> dict[str, Any]:
     in a seeding script — raises rather than returning empty, and on Community
     Cloud a missing secrets file does the same. Both are non-fatal here: the
     environment is the fallback.
+
+    The outcome is recorded in :data:`_SECRETS_STATUS` so the startup screen can
+    report it. Values are never recorded, only key names.
     """
+    global _SECRETS_STATUS
+
     try:
         import streamlit as st
 
-        return {str(k): v for k, v in st.secrets.items()}
-    except Exception:  # noqa: BLE001 - any failure means "no secrets available"
+        found = {str(k): v for k, v in st.secrets.items()}
+    except Exception as exc:  # noqa: BLE001 - any failure means "no secrets"
+        _SECRETS_STATUS = f"unavailable ({type(exc).__name__})"
         return {}
+
+    if not found:
+        _SECRETS_STATUS = "readable but empty"
+        return found
+
+    # Key names only. A section header shows up as a key whose value is a
+    # mapping, which is the usual cause of a setting appearing to be ignored.
+    sections = [k for k, v in found.items() if hasattr(v, "items")]
+    _SECRETS_STATUS = f"{len(found)} key(s): {', '.join(sorted(found))}"
+    if sections:
+        _SECRETS_STATUS += (
+            f" — note {', '.join(sections)} "
+            f"{'is a section' if len(sections) == 1 else 'are sections'}; "
+            "settings must be at the top level, not nested under a [header]"
+        )
+    return found
+
+
+def secrets_status() -> str:
+    """Human-readable account of what was found in st.secrets. Never values."""
+    return _SECRETS_STATUS
 
 
 class Settings(BaseSettings):
