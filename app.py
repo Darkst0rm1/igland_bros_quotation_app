@@ -42,7 +42,7 @@ from modules.session import (
 log = logging.getLogger(__name__)
 
 st.set_page_config(
-    page_title="Igland Bros — Quotations",
+    page_title="Soneet Quotations",
     page_icon="📦",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -135,7 +135,7 @@ def render_login() -> bool:
     """
     left, middle, right = st.columns([1, 1.4, 1])
     with middle:
-        st.title("📦 Igland Bros")
+        st.title("📦 Soneet Quotations")
         st.caption("Quotation system — internal use only")
 
         if pop_expiry_notice():
@@ -169,7 +169,7 @@ def render_login() -> bool:
 
         st.divider()
         st.caption(
-            "This application is for Igland Bros employees. Customers do not have "
+            "This application is for Soneet employees. Customers do not have "
             "accounts and quotations are sent to them outside the system."
         )
 
