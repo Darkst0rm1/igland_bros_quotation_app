@@ -34,6 +34,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
+from modules import item_codes
 from modules.audit_service import record_audit
 from modules.constants import (
     AuditAction,
@@ -515,17 +516,14 @@ def build_plan(
 # Commit
 # --------------------------------------------------------------------------- #
 
-def _slugify(text: str) -> str:
-    return re.sub(r"[^A-Za-z0-9]+", "-", text).strip("-").upper()
-
-
 def _item_number_for(parsed: PriceRowInput) -> str:
-    return _slugify(parsed.product)[:40] or "ITEM"
+    return item_codes.product_code("White Boxes", parsed.product)
 
 
 def _variant_item_number(parsed: PriceRowInput, product_item_number: str) -> str:
-    quality = _slugify(parsed.board_quality)[:30]
-    return f"{product_item_number}-{quality}-{parsed.case_pack}"[:80]
+    return item_codes.variant_code(
+        product_item_number, parsed.board_quality, parsed.case_pack
+    )
 
 
 def commit_plan(
