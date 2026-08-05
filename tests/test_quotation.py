@@ -134,9 +134,9 @@ def _add(session, user, quotation, catalogue, key, tier, packs, containers="0", 
 
 class TestDrafts:
     def test_a_draft_gets_a_number_and_revision_zero(self, draft):
-        assert draft.quote_number == "IGB-QT-2026-0001"
+        assert draft.quote_number == "QT-2026-0001"
         assert draft.revision_no == 0
-        assert draft.display_number == "IGB-QT-2026-0001 Rev 0"
+        assert draft.display_number == "QT-2026-0001 Rev 0"
         assert draft.status is QuotationStatus.DRAFT
 
     def test_numbers_do_not_repeat(self, session, sales, customer):

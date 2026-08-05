@@ -104,7 +104,7 @@ SECRET_KEY = "..."            # python -c "import secrets; print(secrets.token_u
 SESSION_TIMEOUT_MINUTES = 60
 
 STORAGE_BACKEND = "s3"
-STORAGE_BUCKET = "igland-quotations"
+STORAGE_BUCKET = "soneet-quotations"
 STORAGE_ENDPOINT_URL = "https://<project>.supabase.co/storage/v1/s3"
 STORAGE_REGION = "auto"
 STORAGE_ACCESS_KEY_ID = "..."
@@ -148,10 +148,10 @@ with it. Keep one copy somewhere the provider does not control.
 ```bash
 # Weekly database dump
 pg_dump --format=custom --no-owner \
-        --file="igland-$(date +%Y%m%d).dump" "$DATABASE_URL"
+        --file="soneet-$(date +%Y%m%d).dump" "$DATABASE_URL"
 
 # Monthly storage sync
-aws s3 sync s3://igland-quotations ./storage-backup \
+aws s3 sync s3://soneet-quotations ./storage-backup \
     --endpoint-url "$STORAGE_ENDPOINT_URL"
 ```
 
@@ -175,19 +175,19 @@ a hypothesis, not a backup.
 
 ```bash
 # 1. Restore into a scratch database, never over the live one
-createdb igland_restore_test
+createdb soneet_restore_test
 pg_restore --clean --if-exists --no-owner \
-           -d "postgresql://.../igland_restore_test" igland-20260803.dump
+           -d "postgresql://.../soneet_restore_test" soneet-20260803.dump
 
 # 2. Confirm the schema matches the code
-DATABASE_URL="postgresql+psycopg://.../igland_restore_test" alembic current
+DATABASE_URL="postgresql+psycopg://.../soneet_restore_test" alembic current
 # must report the same revision as: alembic heads
 
 # 3. Confirm the schema still satisfies the application
-DATABASE_URL="postgresql+psycopg://.../igland_restore_test" pytest
+DATABASE_URL="postgresql+psycopg://.../soneet_restore_test" pytest
 
 # 4. Spot-check the data
-DATABASE_URL="postgresql+psycopg://.../igland_restore_test" python - <<'EOF'
+DATABASE_URL="postgresql+psycopg://.../soneet_restore_test" python - <<'EOF'
 from sqlalchemy import func, select
 from modules.database import session_scope
 from modules.models import Attachment, Quotation, QuotationRevision

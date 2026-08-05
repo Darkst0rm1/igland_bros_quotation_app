@@ -1,11 +1,11 @@
 """Quotation number allocation.
 
-The format is a company setting, defaulting to ``IGB-QT-{YYYY}-{SEQ:04d}``.
+The format is a company setting, defaulting to ``QT-{YYYY}-{SEQ:04d}``.
 
 Sequence values come from the ``document_sequences`` table under a row lock,
 not from ``MAX(quote_number)``. Two employees clicking "New quotation" in the
 same second would otherwise both read the same maximum and both be handed
-``IGB-QT-2026-0042``, and the unique constraint would reject the second one
+``QT-2026-0042``, and the unique constraint would reject the second one
 after they had already filled the form in.
 """
 
@@ -22,7 +22,7 @@ from modules.models import DocumentSequence
 
 log = logging.getLogger(__name__)
 
-DEFAULT_FORMAT = "IGB-QT-{YYYY}-{SEQ:04d}"
+DEFAULT_FORMAT = "QT-{YYYY}-{SEQ:04d}"
 
 #: Supported placeholders. {SEQ} may carry a width, e.g. {SEQ:05d}.
 _PLACEHOLDER = re.compile(r"\{(YYYY|YY|MM|SEQ)(?::0?(\d+)d)?\}")

@@ -2,7 +2,7 @@
 
 The environment is configured **before** any project module is imported, so the
 settings singleton picks up the temporary database rather than the developer's
-``igland.db``. bcrypt rounds are lowered to keep the suite fast; nothing else
+``soneet.db``. bcrypt rounds are lowered to keep the suite fast; nothing else
 about the configuration differs from development.
 """
 
@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-_TMP = Path(tempfile.mkdtemp(prefix="igland_tests_"))
+_TMP = Path(tempfile.mkdtemp(prefix="soneet_tests_"))
 
 os.environ["APP_ENV"] = "development"
 os.environ["DATABASE_URL"] = f"sqlite:///{(_TMP / 'test.db').as_posix()}"
@@ -118,7 +118,7 @@ def make_user(session, seeded):
         name = username or f"user{counter['n']}"
         user = User(
             username=name,
-            email=f"{name}@igland.invalid",
+            email=f"{name}@soneet.invalid",
             employee_name=name.title(),
             password_hash=hash_password(password),
             is_active=is_active,

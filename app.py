@@ -1,4 +1,4 @@
-"""Igland Bros Quotation Application — entry point.
+"""Soneet Quotation Application — entry point.
 
 Run with::
 
@@ -354,7 +354,7 @@ def main() -> None:
             st.error("The application cannot start.")
             st.markdown(problem or "")
 
-        _run_standalone(_startup_error, "Igland Bros")
+        _run_standalone(_startup_error, "Soneet")
         return
 
     # Every st.rerun() in this application is issued here, at the top level of

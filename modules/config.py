@@ -98,7 +98,7 @@ class Settings(BaseSettings):
     tz: str = "Europe/Istanbul"
 
     # --- Database ---------------------------------------------------------
-    database_url: str = "sqlite:///./igland.db"
+    database_url: str = "sqlite:///./soneet.db"
 
     # --- Session & authentication ----------------------------------------
     secret_key: str = "dev-only-insecure-key-change-me"

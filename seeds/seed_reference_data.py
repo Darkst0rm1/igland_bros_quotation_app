@@ -1,6 +1,6 @@
 """Seed price tiers, company settings and application tunables.
 
-Company identity is seeded as **flagged placeholders**. Nothing about Igland
+Company identity is seeded as **flagged placeholders**. Nothing about the company
 Bros is compiled into the application; the Company Settings page shows a banner
 until ``is_placeholder`` is cleared by a real edit.
 """
@@ -116,8 +116,8 @@ def seed_company_settings(session: Session) -> CompanySettings:
     # header rather than printing "Address not set" at a customer.
     settings = CompanySettings(
         id=1,
-        legal_name="Igland Bros",
-        trading_name="Igland Bros",
+        legal_name="Soneet",
+        trading_name="Soneet",
         address_line1="",
         city="",
         country="",
@@ -127,7 +127,7 @@ def seed_company_settings(session: Session) -> CompanySettings:
         tax_number="",
         default_currency="USD",
         default_quote_validity_days=30,
-        quote_number_format="IGB-QT-{YYYY}-{SEQ:04d}",
+        quote_number_format="QT-{YYYY}-{SEQ:04d}",
         # From the reference workbook's Notes row: "Printing plate charge is
         # 200 USD per size per color." Configurable from day one.
         printing_plate_rate=Decimal("200.00"),

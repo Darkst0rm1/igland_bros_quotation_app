@@ -267,7 +267,7 @@ class UserPermission(Base):
 class CompanySettings(Base, TimestampMixin):
     """Single-row company identity and document defaults.
 
-    Nothing about Igland Bros is compiled into code. Seeded values are marked
+    Nothing about the company is compiled into code. Seeded values are marked
     ``is_placeholder`` and the Company Settings page warns until they are
     replaced.
     """
@@ -301,7 +301,7 @@ class CompanySettings(Base, TimestampMixin):
     )
     #: Placeholders: {YYYY} {YY} {MM} {SEQ:04d}. Validated on save.
     quote_number_format: Mapped[str] = mapped_column(
-        String(80), nullable=False, default="IGB-QT-{YYYY}-{SEQ:04d}"
+        String(80), nullable=False, default="QT-{YYYY}-{SEQ:04d}"
     )
     #: USD 200 per size per colour, from the reference workbook's Notes row.
     printing_plate_rate: Mapped[Decimal] = mapped_column(
@@ -316,7 +316,7 @@ class CompanySettings(Base, TimestampMixin):
     pdf_confidentiality_text: Mapped[str | None] = mapped_column(Text)
     pdf_thank_you_text: Mapped[str | None] = mapped_column(Text)
     #: Ordered list of product-table column keys. The reference PDF quotes per
-    #: case in CAD; Igland quotes per pack and per piece FOB, so the column set
+    #: case in CAD; the company quotes per pack and per piece FOB, so the column set
     #: has to be configuration rather than a fixed layout.
     pdf_column_set: Mapped[dict[str, Any] | None] = mapped_column(JSONType)
     pdf_show_acceptance_line: Mapped[bool] = mapped_column(

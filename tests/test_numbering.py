@@ -28,7 +28,7 @@ class TestFormatValidation:
     @pytest.mark.parametrize(
         "fmt",
         [
-            "IGB-QT-{YYYY}-{SEQ:04d}",
+            "QT-{YYYY}-{SEQ:04d}",
             "{YY}{MM}-{SEQ:05d}",
             "QUOTE-{SEQ}",
             "IGB/{YYYY}/{MM}/{SEQ:03d}",
@@ -39,7 +39,7 @@ class TestFormatValidation:
 
     def test_a_format_without_seq_is_rejected(self):
         with pytest.raises(NumberFormatError, match="SEQ"):
-            validate_format("IGB-QT-{YYYY}")
+            validate_format("QT-{YYYY}")
 
     def test_an_empty_format_is_rejected(self):
         with pytest.raises(NumberFormatError):
@@ -47,14 +47,14 @@ class TestFormatValidation:
 
     def test_an_unknown_placeholder_is_rejected(self):
         with pytest.raises(NumberFormatError, match="unrecognised"):
-            validate_format("IGB-{CUSTOMER}-{SEQ:04d}")
+            validate_format("QT-{CUSTOMER}-{SEQ:04d}")
 
 
 class TestRendering:
     def test_default_format(self):
-        assert render(DEFAULT_FORMAT, 1, JAN) == "IGB-QT-2026-0001"
-        assert render(DEFAULT_FORMAT, 42, JAN) == "IGB-QT-2026-0042"
-        assert render(DEFAULT_FORMAT, 12345, JAN) == "IGB-QT-2026-12345"
+        assert render(DEFAULT_FORMAT, 1, JAN) == "QT-2026-0001"
+        assert render(DEFAULT_FORMAT, 42, JAN) == "QT-2026-0042"
+        assert render(DEFAULT_FORMAT, 12345, JAN) == "QT-2026-12345"
 
     def test_two_digit_year_and_month(self):
         assert render("{YY}{MM}-{SEQ:03d}", 7, JAN) == "2601-007"
@@ -81,9 +81,9 @@ class TestAllocation:
         numbers = [allocate_quote_number(session, on_date=JAN) for _ in range(3)]
         session.commit()
         assert numbers == [
-            "IGB-QT-2026-0001",
-            "IGB-QT-2026-0002",
-            "IGB-QT-2026-0003",
+            "QT-2026-0001",
+            "QT-2026-0002",
+            "QT-2026-0003",
         ]
 
     def test_no_duplicates_across_many_allocations(self, session):
@@ -95,14 +95,14 @@ class TestAllocation:
         allocate_quote_number(session, on_date=DEC)
         allocate_quote_number(session, on_date=DEC)
         session.commit()
-        assert allocate_quote_number(session, on_date=NEXT_YEAR) == "IGB-QT-2027-0001"
+        assert allocate_quote_number(session, on_date=NEXT_YEAR) == "QT-2027-0001"
         session.commit()
 
     def test_years_keep_independent_counters(self, session):
         allocate_quote_number(session, on_date=JAN)
         allocate_quote_number(session, on_date=NEXT_YEAR)
         session.commit()
-        assert allocate_quote_number(session, on_date=JAN) == "IGB-QT-2026-0002"
+        assert allocate_quote_number(session, on_date=JAN) == "QT-2026-0002"
         session.commit()
 
     def test_a_custom_format_is_honoured(self, session):
@@ -112,14 +112,14 @@ class TestAllocation:
 
     def test_allocation_rejects_a_bad_format_before_touching_the_sequence(self, session):
         with pytest.raises(NumberFormatError):
-            allocate_quote_number(session, fmt="IGB-{YYYY}", on_date=JAN)
+            allocate_quote_number(session, fmt="QT-{YYYY}", on_date=JAN)
 
     def test_peek_does_not_consume(self, session):
-        assert peek_next_number(session, on_date=JAN) == "IGB-QT-2026-0001"
-        assert peek_next_number(session, on_date=JAN) == "IGB-QT-2026-0001"
-        assert allocate_quote_number(session, on_date=JAN) == "IGB-QT-2026-0001"
+        assert peek_next_number(session, on_date=JAN) == "QT-2026-0001"
+        assert peek_next_number(session, on_date=JAN) == "QT-2026-0001"
+        assert allocate_quote_number(session, on_date=JAN) == "QT-2026-0001"
         session.commit()
-        assert peek_next_number(session, on_date=JAN) == "IGB-QT-2026-0002"
+        assert peek_next_number(session, on_date=JAN) == "QT-2026-0002"
 
     def test_allocation_survives_a_rolled_back_transaction(self, session):
         """A rolled-back draft may leave a gap in the sequence, but must never
@@ -145,7 +145,7 @@ class TestRevisionLabels:
         session.flush()
 
         quote = Quotation(
-            quote_number="IGB-QT-2026-0001", revision_no=0,
+            quote_number="QT-2026-0001", revision_no=0,
             customer_id=customer.id, sales_user_id=user.id,
             quote_date=datetime.date(2026, 8, 3),
         )
@@ -153,9 +153,9 @@ class TestRevisionLabels:
         session.flush()
 
         assert quote.revision_label == "Rev 0"
-        assert quote.display_number == "IGB-QT-2026-0001 Rev 0"
+        assert quote.display_number == "QT-2026-0001 Rev 0"
         quote.revision_no = 2
-        assert quote.display_number == "IGB-QT-2026-0001 Rev 2"
+        assert quote.display_number == "QT-2026-0001 Rev 2"
 
     def test_the_same_number_may_not_repeat_a_revision(self, session):
         import datetime
@@ -171,7 +171,7 @@ class TestRevisionLabels:
 
         for _ in range(2):
             session.add(Quotation(
-                quote_number="IGB-QT-2026-0001", revision_no=0,
+                quote_number="QT-2026-0001", revision_no=0,
                 customer_id=customer.id, sales_user_id=user.id,
                 quote_date=datetime.date(2026, 8, 3),
             ))

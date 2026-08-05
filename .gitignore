@@ -40,4 +40,10 @@ desktop.ini
 # --- Accidental nested clone ----------------------------------------------
 # A clone of this repository was once made inside itself, which git records as
 # a gitlink rather than files. Ignored so it cannot be committed again.
+#
+# Keeps the pre-rename name deliberately: the directory on disk is still called
+# igland_bros_quotation_app, and renaming it here would stop the ignore
+# matching and let the clone be committed. Both names are listed so the entry
+# survives whichever way round things end up.
 /igland_bros_quotation_app/
+/soneet_quotation_app/

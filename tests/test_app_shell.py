@@ -431,7 +431,7 @@ class TestQuotationPages:
             active_quotation_id=priced_quotation["quotation_id"],
         )
         assert not app.exception, app.exception
-        assert any("IGB-QT-2026-0001" in t.value for t in app.title)
+        assert any("QT-2026-0001" in t.value for t in app.title)
         assert any(m.value == "$7,420.00" for m in app.metric)
 
     def test_history_lists_the_quotation(self, session, priced_quotation):
@@ -440,7 +440,7 @@ class TestQuotationPages:
         )
         assert not app.exception, app.exception
         frame = app.dataframe[0].value
-        assert "IGB-QT-2026-0001" in frame["Number"].to_list()
+        assert "QT-2026-0001" in frame["Number"].to_list()
 
     def test_history_is_scoped_to_what_the_user_may_see(
         self, session, priced_quotation, make_user

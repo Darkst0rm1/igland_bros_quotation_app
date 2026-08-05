@@ -1,4 +1,4 @@
-# Igland Bros Quotation Application
+# Soneet Quotation Application
 # Pinned so the Streamlit Community Cloud image matches local development.
 # Verified installing cleanly on Python 3.14.5 (local) — all wheels also publish
 # cp313 builds, which is what Community Cloud runs. See docs/PHASE1_ARCHITECTURE.md §11.1.

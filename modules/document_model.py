@@ -25,7 +25,7 @@ from modules.utilities import compose_spec_text, format_money, format_quantity
 
 #: Columns the product table can show, and how each is derived. The set in use
 #: is a company setting: the reference PDF quotes price per case in CAD, while
-#: Igland quotes per pack and per piece FOB, so a fixed layout would be wrong
+#: The company quotes per pack and per piece FOB, so a fixed layout would be wrong
 #: for one of them.
 AVAILABLE_COLUMNS: dict[str, str] = {
     "item": "Item",
@@ -383,7 +383,7 @@ def build_document(
     company = DocumentCompany(
         name=(
             (settings.trading_name or settings.legal_name) if settings
-            else "Igland Bros"
+            else "Soneet"
         ),
         address_lines=address_lines,
         phone=(settings.phone or "") if settings else "",

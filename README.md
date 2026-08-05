@@ -1,4 +1,4 @@
-# Igland Bros — Quotation Application
+# Soneet — Quotation Application
 
 Internal Streamlit application for creating, approving and tracking customer
 quotations. **Employees only** — customers never log in. Quotations are sent to
@@ -53,7 +53,7 @@ Requires Python 3.13 or 3.14.
 
 ```bash
 git clone <repository-url>
-cd igland_bros_quotation_app
+cd soneet_quotation_app
 
 python -m venv .venv
 .venv/Scripts/activate          # Windows
@@ -135,7 +135,7 @@ DATABASE_URL = "postgresql+psycopg://USER:PASSWORD@HOST:5432/DB?sslmode=require"
 SECRET_KEY = "<python -c 'import secrets; print(secrets.token_urlsafe(48))'>"
 
 STORAGE_BACKEND = "s3"
-STORAGE_BUCKET = "igland-quotations"
+STORAGE_BUCKET = "soneet-quotations"
 STORAGE_ENDPOINT_URL = "https://<project>.supabase.co/storage/v1/s3"
 STORAGE_ACCESS_KEY_ID = "..."
 STORAGE_SECRET_ACCESS_KEY = "..."

@@ -77,7 +77,7 @@ class TestLogin:
 
     def test_login_by_email(self, session, make_user):
         make_user(RoleCode.SALES.value, username="alice", password=PASSWORD)
-        result = authenticate(session, "alice@igland.invalid", PASSWORD)
+        result = authenticate(session, "alice@soneet.invalid", PASSWORD)
         assert result.user.username == "alice"
 
     def test_username_is_case_insensitive(self, session, make_user):

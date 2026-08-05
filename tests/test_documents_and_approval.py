@@ -217,7 +217,7 @@ class TestDocumentModel:
         self, session, quotation
     ):
         stem = document_model.build_document(session, quotation).file_stem
-        assert stem.startswith("IGB-QT-2026-0001_Rev0")
+        assert stem.startswith("QT-2026-0001_Rev0")
         assert all(c.isalnum() or c in "._-" for c in stem)
 
 
@@ -244,7 +244,7 @@ class TestRenderers:
         model = document_model.build_document(session, quotation)
         text = PdfReader(BytesIO(pdf_generator.render(model))).pages[0].extract_text()
 
-        assert "IGB-QT-2026-0001" in text
+        assert "QT-2026-0001" in text
         assert "Bunzl Canada" in text
         assert '12" White' in text
         assert "1,000" in text
@@ -260,7 +260,7 @@ class TestRenderers:
             cell.text for table in document.tables
             for row in table.rows for cell in row.cells
         )
-        assert "IGB-QT-2026-0001" in text
+        assert "QT-2026-0001" in text
         assert "Bunzl Canada" in text
         assert '12" White' in text
 
@@ -707,7 +707,7 @@ class TestRevisions:
         record = self._issue(session, sales, manager, quotation)
         assert quotation.is_locked
         assert quotation.issued_at is not None
-        assert record.snapshot_json["quote_number"] == "IGB-QT-2026-0001"
+        assert record.snapshot_json["quote_number"] == "QT-2026-0001"
         assert len(record.snapshot_json["lines"]) == 1
         assert record.new_pdf_attachment_id is not None
 

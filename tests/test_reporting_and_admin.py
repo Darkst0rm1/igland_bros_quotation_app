@@ -321,12 +321,12 @@ class TestUserAdministration:
     def test_creating_an_account_returns_a_one_time_password(self, session, admin):
         created, temporary = user_service.create_user(
             session, admin,
-            username="Carol", email="Carol@Igland.invalid",
+            username="Carol", email="Carol@Soneet.invalid",
             employee_name="Carol Smith", role_codes=[RoleCode.SALES.value],
         )
         session.commit()
         assert created.username == "carol"       # normalised
-        assert created.email == "carol@igland.invalid"
+        assert created.email == "carol@soneet.invalid"
         assert created.must_change_password
         assert temporary and temporary not in created.password_hash
 
@@ -566,12 +566,12 @@ class TestSettings:
         assert settings_service.piece_pack_tolerance(session) == D("0.0001")
 
     @pytest.mark.parametrize(
-        "fmt", ["IGB-QT-{YYYY}-{SEQ:04d}", "{YY}{MM}-{SEQ:05d}", "Q-{SEQ}"]
+        "fmt", ["QT-{YYYY}-{SEQ:04d}", "{YY}{MM}-{SEQ:05d}", "Q-{SEQ}"]
     )
     def test_valid_number_formats_are_accepted(self, fmt):
         validate_format(fmt)
 
-    @pytest.mark.parametrize("fmt", ["IGB-{YYYY}", "", "IGB-{CUSTOMER}-{SEQ}"])
+    @pytest.mark.parametrize("fmt", ["QT-{YYYY}", "", "QT-{CUSTOMER}-{SEQ}"])
     def test_invalid_number_formats_are_refused(self, fmt):
         with pytest.raises(NumberFormatError):
             validate_format(fmt)

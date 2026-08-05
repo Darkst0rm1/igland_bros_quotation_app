@@ -165,7 +165,7 @@ def quotations(session, make_user):
     made = {}
     for owner in (alice, bob):
         quote = Quotation(
-            quote_number=f"IGB-QT-2026-{owner.id:04d}",
+            quote_number=f"QT-2026-{owner.id:04d}",
             revision_no=0,
             customer_id=customer.id,
             sales_user_id=owner.id,

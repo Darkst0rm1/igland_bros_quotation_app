@@ -1,6 +1,6 @@
 """Company Settings — identity, document defaults and tunable thresholds.
 
-Nothing about Igland Bros is compiled into the application. Everything here is
+Nothing about the company is compiled into the application. Everything here is
 data, and anything left blank is omitted from the quotation document rather
 than printed as a placeholder.
 """
@@ -263,7 +263,7 @@ with document_tab:
 
         st.markdown("###### Product table columns")
         st.caption(
-            "The reference PDF quotes price per case; Igland quotes per pack and per "
+            "The reference PDF quotes price per case; this company quotes per pack and per "
             "piece. The column set is configuration rather than a fixed layout, and "
             "applies to both the PDF and the Word document."
         )

@@ -1,4 +1,4 @@
-# Igland Bros Quotation Application — Architecture & Implementation Plan
+# Soneet Quotation Application — Architecture & Implementation Plan
 
 Phase 1 deliverable. Companion document: `PHASE1_REFERENCE_ANALYSIS.md`.
 
@@ -61,7 +61,7 @@ Three rules make the layering worth having:
 ## 2. Folder structure
 
 ```text
-igland_bros_quotation_app/
+soneet_quotation_app/
 ├── app.py                          # entrypoint: bootstrap, login gate, st.navigation
 ├── pages/
 │   ├── 01_Dashboard.py             06_Products_and_Pricing.py
@@ -166,7 +166,7 @@ are the union of their role grants and their individual grants.
 * `exchange_rates` — `from_currency`, `to_currency`, `rate` `Numeric(18,8)`, `rate_date`, `source`.
   UQ (`from_currency`, `to_currency`, `rate_date`).
 
-Nothing about Igland Bros is compiled into code. Seeds insert placeholders flagged
+Nothing about the company is compiled into code. Seeds insert placeholders flagged
 `is_placeholder=true`, and the Company Settings page shows a banner until they are replaced.
 
 ### 3.3 Customers (3)
@@ -693,7 +693,7 @@ app_settings             tunable thresholds            key/value, edited in the 
 ```
 
 ```
-APP_ENV=development                 DATABASE_URL=sqlite:///./igland.db
+APP_ENV=development                 DATABASE_URL=sqlite:///./soneet.db
 SECRET_KEY=                         SESSION_TIMEOUT_MINUTES=60
 BCRYPT_ROUNDS=12                    MAX_FAILED_LOGINS=5
 LOCKOUT_MINUTES=15                  LOG_LEVEL=INFO
@@ -731,7 +731,7 @@ an action.
 
 **Streamlit Community Cloud apps are served on the public internet at a guessable
 `*.streamlit.app` URL, and are public by default.** For an application that holds customer
-contact details, cost data, margins and every quotation Igland Bros has ever priced, the
+contact details, cost data, margins and every quotation the company has ever priced, the
 login form is then the only thing between the open internet and that data.
 
 Three things follow, and the first is not optional:
@@ -859,6 +859,6 @@ Assumptions made so work can proceed; each is cheap to change now and progressiv
    permission. Costs are effective-dated on the same append-only pattern as sell prices, so a
    historical quotation's margin stays reproducible. Margin reports read as empty until costs are
    populated — expected, not a defect.
-5. **Igland Bros identity** — legal name, address, phone, email, website, tax number, logo and
+5. **Company identity** — legal name, address, phone, email, website, tax number, logo and
    signature image are seeded as flagged placeholders and must be replaced in Company Settings
    before the first real quotation is issued.

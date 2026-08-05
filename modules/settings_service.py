@@ -44,7 +44,7 @@ def get_company_settings(session: Session) -> CompanySettings | None:
 def company_name(session: Session) -> str:
     settings = get_company_settings(session)
     if settings is None:
-        return "Igland Bros"
+        return "Soneet"
     return settings.trading_name or settings.legal_name
 
 

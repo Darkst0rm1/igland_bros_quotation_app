@@ -140,20 +140,20 @@ to final art/structural approval and POs for boxes *and tooling*, ±10% underrun
 ### 2.1 What this changes in the PDF generator
 
 * The reference has **no subtotal / tax / grand-total block and no line quantities** — it is a rate
-  card, not a priced order. The Igland Bros PDF needs both, so the totals block is original design,
+  card, not a priced order. Our PDF needs both, so the totals block is original design,
   not a copy.
-* Its money column is *price per case in CAD*; Igland's is *price per pack and per piece in USD,
+* Its money column is *price per case in CAD*; ours is *price per pack and per piece in USD,
   FOB Çerkezköy*. The product table must therefore be **column-configurable** rather than fixed —
   the column set is a company setting, defaulting to
   `Item · Description · Size · Pack size · Qty (packs) · Price/pack · Price/pcs · Line total`.
 * `SPEC` is a single dense string (`White/Kraft 3-4C, Perforated / No-Lock`). That maps to a
   **composed** value from `material · num_colours · perforated · lock_style` on the variant, with a
   per-line editable override.
-* Only 11 rows, so pagination is untested by the reference. Igland's generator must still do
+* Only 11 rows, so pagination is untested by the reference. Our generator must still do
   repeating table headers and controlled row splitting.
 * No page numbering, no confidentiality wording, no revision marker. All three are additions the
   brief requires.
-* Branding, colour and the wordmark treatment are ECOPAC's and are **not** reproduced. Igland Bros
+* Branding, colour and the wordmark treatment are ECOPAC's and are **not** reproduced. The document
   gets an original layout driven by `company_settings` (logo, colours, footer text, signature block).
 
 ---

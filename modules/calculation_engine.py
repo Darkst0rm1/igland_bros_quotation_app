@@ -301,7 +301,7 @@ def compute_totals(
 
     Non-taxable charges are added after tax is computed, which is the point of
     marking them non-taxable. Internal-only charges still count toward the
-    grand total — they are costs Igland Bros incurs, hidden from the customer
+    grand total — they are costs the company incurs, hidden from the customer
     PDF but not from the quotation's own arithmetic.
     """
     charges = charges or []

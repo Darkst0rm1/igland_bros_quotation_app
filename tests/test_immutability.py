@@ -208,7 +208,7 @@ def issued_quotation(session):
     session.flush()
 
     quote = Quotation(
-        quote_number="IGB-QT-2026-0001", revision_no=0,
+        quote_number="QT-2026-0001", revision_no=0,
         customer_id=customer.id, sales_user_id=user.id,
         quote_date=dt.date(2026, 8, 3), project_name="Pizza boxes",
         subtotal=D("1000.00"), grand_total=D("1000.00"),
