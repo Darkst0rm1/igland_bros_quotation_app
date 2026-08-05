@@ -122,6 +122,38 @@ REPORTS: list[dict] = [
         "fn": reporting_service.count_by_status,
         "note": "The pipeline as a table.",
     },
+    {
+        "name": "Containers by size",
+        "fn": reporting_service.containers_by_size,
+        "note": "Container volume by size, across every quotation in scope.",
+    },
+    {
+        "name": "Containers by type",
+        "fn": reporting_service.containers_by_type,
+        "note": "Dry, high cube, reefer and the rest.",
+    },
+    {
+        "name": "Containers by shipping line",
+        "fn": reporting_service.containers_by_shipping_line,
+        "note": (
+            "Carrier usage. Rows booked outside the managed carrier list appear "
+            "under the name that was typed."
+        ),
+    },
+    {
+        "name": "Shipping routes",
+        "fn": reporting_service.containers_by_route,
+        "note": "Loading and discharge ports, with the average transit time quoted.",
+    },
+    {
+        "name": "Shipment detail",
+        "fn": reporting_service.shipments,
+        "note": (
+            "One row per container. Includes freight, so it requires the "
+            "shipment.view_freight permission."
+        ),
+        "requires": Perm.SHIPMENT_VIEW_FREIGHT,
+    },
 ]
 
 available = [
@@ -134,6 +166,11 @@ if not can_see_margins:
         "Reports containing cost or margin figures are not shown — they require the "
         "margin.view permission."
     )
+if not user.has(Perm.SHIPMENT_VIEW_FREIGHT):
+    st.caption(
+        "The shipment detail report is not shown — it contains freight, which "
+        "requires the shipment.view_freight permission."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -142,6 +179,7 @@ if not can_see_margins:
 
 with session_scope() as db:
     options = reporting_service.filter_options(db, user)
+    shipping_options = reporting_service.shipping_filter_options(db)
 
 chosen = st.selectbox(
     "Report", available, format_func=lambda r: r["name"]
@@ -177,6 +215,43 @@ with st.expander("Filters", expanded=False):
             format_func=lambda code: dict(options["tiers"])[code], placeholder="All",
         )
 
+    st.markdown("###### Container shipping")
+    row_c = st.columns(3)
+    with row_c[0]:
+        chosen_carriers = st.multiselect(
+            "Shipping line", [c[0] for c in shipping_options["carriers"]],
+            format_func=lambda cid: dict(shipping_options["carriers"])[cid],
+            placeholder="All",
+        )
+    with row_c[1]:
+        chosen_sizes = st.multiselect(
+            "Container size", [s[0] for s in shipping_options["sizes"]],
+            format_func=lambda code: dict(shipping_options["sizes"])[code],
+            placeholder="All",
+        )
+    with row_c[2]:
+        chosen_types = st.multiselect(
+            "Container type", [c[0] for c in shipping_options["types"]],
+            format_func=lambda code: dict(shipping_options["types"])[code],
+            placeholder="All",
+        )
+    row_d = st.columns(4)
+    with row_d[0]:
+        chosen_freight = st.multiselect(
+            "Freight method", [m[0] for m in shipping_options["freight_methods"]],
+            format_func=lambda code: dict(shipping_options["freight_methods"])[code],
+            placeholder="All",
+        )
+    with row_d[1]:
+        loading_port = st.text_input("Port of loading contains")
+    with row_d[2]:
+        discharge_port = st.text_input("Port of discharge contains")
+    with row_d[3]:
+        max_transit = st.number_input(
+            "Maximum transit (days)", min_value=0, value=0, step=1,
+            help="0 applies no limit.",
+        )
+
 filters = ReportFilters(
     date_from=date_from,
     date_to=date_to,
@@ -185,6 +260,13 @@ filters = ReportFilters(
     statuses=tuple(chosen_statuses),
     currency=None if chosen_currency == "All" else chosen_currency,
     tier_codes=tuple(chosen_tiers),
+    shipping_line_ids=tuple(chosen_carriers),
+    container_sizes=tuple(chosen_sizes),
+    container_types=tuple(chosen_types),
+    freight_methods=tuple(chosen_freight),
+    port_of_loading=loading_port or None,
+    port_of_discharge=discharge_port or None,
+    max_transit_days=int(max_transit) or None,
 )
 
 

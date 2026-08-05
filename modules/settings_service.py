@@ -176,6 +176,61 @@ def expiring_soon_days(session: Session) -> list[int]:
     return [int(d) for d in get_list(session, "expiring_soon_days", [7, 30])]
 
 
+def default_incoterm(session: Session):  # noqa: ANN201
+    """Seeded from the price list: "FOB Çerkezköy (Türkiye) (INCOTERMS 2020)"."""
+    from modules.constants import DEFAULT_INCOTERM, Incoterm
+
+    raw = get_str(session, "default_incoterm", DEFAULT_INCOTERM.value).upper()
+    try:
+        return Incoterm(raw)
+    except ValueError:
+        log.warning("Setting default_incoterm is not a known Incoterm (%r)", raw)
+        return DEFAULT_INCOTERM
+
+
+def default_incoterm_place(session: Session) -> str:
+    return get_str(session, "default_incoterm_place", "Çerkezköy, Türkiye")
+
+
+def default_origin_country(session: Session) -> str:
+    return get_str(session, "default_origin_country", "Türkiye")
+
+
+def default_port_of_loading(session: Session) -> str:
+    return get_str(session, "default_port_of_loading", "")
+
+
+def default_loading_method(session: Session):  # noqa: ANN201
+    """The price list says floor loaded."""
+    from modules.constants import DEFAULT_LOADING_METHOD, LoadingMethod
+
+    raw = get_str(session, "default_loading_method", DEFAULT_LOADING_METHOD.value).upper()
+    try:
+        return LoadingMethod(raw)
+    except ValueError:
+        return DEFAULT_LOADING_METHOD
+
+
+def default_container_size(session: Session):  # noqa: ANN201
+    from modules.constants import DEFAULT_CONTAINER_SIZE, ContainerSize
+
+    raw = get_str(session, "default_container_size", DEFAULT_CONTAINER_SIZE.value).upper()
+    try:
+        return ContainerSize(raw)
+    except ValueError:
+        return DEFAULT_CONTAINER_SIZE
+
+
+def default_container_type(session: Session):  # noqa: ANN201
+    from modules.constants import DEFAULT_CONTAINER_TYPE, ContainerType
+
+    raw = get_str(session, "default_container_type", DEFAULT_CONTAINER_TYPE.value).upper()
+    try:
+        return ContainerType(raw)
+    except ValueError:
+        return DEFAULT_CONTAINER_TYPE
+
+
 def default_lead_time_text(session: Session) -> str:
     return get_str(
         session,

@@ -20,7 +20,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from modules.database import session_scope  # noqa: E402
-from seeds import seed_reference_data, seed_roles_permissions, seed_term_templates  # noqa: E402
+from seeds import (  # noqa: E402
+    seed_reference_data,
+    seed_roles_permissions,
+    seed_shipping,
+    seed_term_templates,
+)
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +34,7 @@ def run() -> None:
     with session_scope() as session:
         seed_reference_data.run(session)
         seed_term_templates.run(session)
+        seed_shipping.run(session)
         user, temporary_password = seed_roles_permissions.run(session)
 
     print("\nSeeding complete.")

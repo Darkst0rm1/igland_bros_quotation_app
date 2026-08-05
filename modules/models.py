@@ -42,6 +42,11 @@ from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
 
 from modules.constants import (
     AddressType,
+    ContainerSize,
+    ContainerType,
+    FreightMethod,
+    Incoterm,
+    LoadingMethod,
     ApprovalDecision,
     ChargeType,
     CustomerResponse,
@@ -759,6 +764,11 @@ class Quotation(Base, TimestampMixin, SoftDeleteMixin):
         cascade="all, delete-orphan",
         order_by="QuotationTerm.sort_order",
     )
+    #: Optional. A quotation without one behaves exactly as it did before
+    #: container shipping existed.
+    shipment: Mapped[QuotationShipment | None] = relationship(
+        back_populates="quotation", cascade="all, delete-orphan", uselist=False
+    )
     approvals: Mapped[list[Approval]] = relationship(back_populates="quotation")
     response_logs: Mapped[list[CustomerResponseLog]] = relationship(
         back_populates="quotation"
@@ -1174,6 +1184,255 @@ class DocumentSequence(Base):
 
 
 # --------------------------------------------------------------------------- #
+# 32-36. Container shipping
+# --------------------------------------------------------------------------- #
+
+class ShippingLine(Base, TimestampMixin, SoftDeleteMixin):
+    """Carrier master data, maintained from Company Settings."""
+
+    __tablename__ = "shipping_lines"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+
+
+class ProductContainerCapacity(Base, TimestampMixin):
+    """How much of a product fits in a container.
+
+    Keyed on the **product**, not the variant: capacity is a function of the
+    box's geometry, and the two board qualities of a given size are
+    dimensionally identical. The source workbook gives one figure per size,
+    which agrees with that.
+
+    ``bundles_per_container`` is the authoritative imported figure.
+    ``units_per_bundle`` is nullable because the source does not define what a
+    bundle contains — until someone supplies it, pieces and cases per container
+    are reported as unavailable rather than guessed.
+    """
+
+    __tablename__ = "product_container_capacity"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    product_id: Mapped[int] = mapped_column(
+        ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    container_size: Mapped[ContainerSize] = mapped_column(
+        _enum(ContainerSize), nullable=False, default=ContainerSize.FORTY_FT_HC
+    )
+    container_type: Mapped[ContainerType] = mapped_column(
+        _enum(ContainerType), nullable=False, default=ContainerType.DRY
+    )
+
+    bundles_per_container: Mapped[Decimal] = mapped_column(quantity(), nullable=False)
+    units_per_bundle: Mapped[Decimal | None] = mapped_column(quantity())
+    pallets_per_container: Mapped[Decimal | None] = mapped_column(quantity())
+
+    source_workbook_name: Mapped[str | None] = mapped_column(String(255))
+    source_row_no: Mapped[int | None] = mapped_column(Integer)
+    #: Set when the imported figure departs from the trend of its neighbours.
+    #: Recorded rather than corrected — see docs/SHIPPING.md.
+    is_anomalous: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    anomaly_note: Mapped[str | None] = mapped_column(Text)
+    notes: Mapped[str | None] = mapped_column(Text)
+
+    created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+
+    product: Mapped[Product] = relationship()
+
+    __table_args__ = (
+        UniqueConstraint("product_id", "container_size", "container_type"),
+        CheckConstraint("bundles_per_container > 0", name="bundles_positive"),
+    )
+
+    @property
+    def pieces_per_container(self) -> Decimal | None:
+        """``None`` until someone says how many units are in a bundle."""
+        if self.units_per_bundle is None:
+            return None
+        return self.bundles_per_container * self.units_per_bundle
+
+
+class QuotationShipment(Base, TimestampMixin):
+    """The shipping arrangement for one quotation. At most one per quotation.
+
+    Optional throughout: a quotation without a shipment behaves exactly as it
+    did before container shipping existed.
+    """
+
+    __tablename__ = "quotation_shipments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    quotation_id: Mapped[int] = mapped_column(
+        ForeignKey("quotations.id", ondelete="CASCADE"),
+        nullable=False, unique=True, index=True,
+    )
+
+    incoterm: Mapped[Incoterm | None] = mapped_column(_enum(Incoterm, length=10))
+    incoterm_place: Mapped[str | None] = mapped_column(String(160))
+    origin_country: Mapped[str | None] = mapped_column(String(120))
+    port_of_loading: Mapped[str | None] = mapped_column(String(160))
+    port_of_discharge: Mapped[str | None] = mapped_column(String(160))
+    final_destination: Mapped[str | None] = mapped_column(String(160))
+
+    freight_method: Mapped[FreightMethod] = mapped_column(
+        _enum(FreightMethod), nullable=False, default=FreightMethod.INCLUDED
+    )
+    #: Sum of the container rows' freight. Maintained by shipping_service.
+    total_freight: Mapped[Decimal] = mapped_column(
+        money(), nullable=False, default=Decimal("0")
+    )
+    freight_currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
+    freight_taxable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    loading_method: Mapped[LoadingMethod | None] = mapped_column(_enum(LoadingMethod))
+    shipping_notes: Mapped[str | None] = mapped_column(Text)
+
+    #: The document section is opt-in per quotation, so existing quotations and
+    #: anyone who does not want it produce byte-identical output.
+    show_on_document: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    customer_visible_freight: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+
+    created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    updated_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+
+    quotation: Mapped[Quotation] = relationship(back_populates="shipment")
+    containers: Mapped[list[ShipmentContainer]] = relationship(
+        back_populates="shipment",
+        cascade="all, delete-orphan",
+        order_by="ShipmentContainer.sort_order",
+    )
+
+    @property
+    def total_containers(self) -> Decimal:
+        return sum((c.container_count for c in self.containers), Decimal("0"))
+
+
+class ShipmentContainer(Base, TimestampMixin):
+    """One container configuration. A shipment may have several."""
+
+    __tablename__ = "shipment_containers"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    quotation_shipment_id: Mapped[int] = mapped_column(
+        ForeignKey("quotation_shipments.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    shipping_line_id: Mapped[int | None] = mapped_column(ForeignKey("shipping_lines.id"))
+    #: Used when the carrier is not on the managed list ("Other").
+    custom_shipping_line: Mapped[str | None] = mapped_column(String(120))
+
+    container_size: Mapped[ContainerSize] = mapped_column(
+        _enum(ContainerSize), nullable=False, default=ContainerSize.FORTY_FT_HC
+    )
+    custom_container_size: Mapped[str | None] = mapped_column(String(60))
+    container_type: Mapped[ContainerType] = mapped_column(
+        _enum(ContainerType), nullable=False, default=ContainerType.DRY
+    )
+    custom_container_type: Mapped[str | None] = mapped_column(String(60))
+    container_count: Mapped[Decimal] = mapped_column(
+        quantity(), nullable=False, default=Decimal("1")
+    )
+
+    freight_cost: Mapped[Decimal] = mapped_column(
+        money(), nullable=False, default=Decimal("0")
+    )
+    freight_currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
+
+    port_of_loading: Mapped[str | None] = mapped_column(String(160))
+    port_of_discharge: Mapped[str | None] = mapped_column(String(160))
+    estimated_departure: Mapped[dt.date | None] = mapped_column(Date)
+    estimated_arrival: Mapped[dt.date | None] = mapped_column(Date)
+    transit_days: Mapped[int | None] = mapped_column(Integer)
+
+    loading_method: Mapped[LoadingMethod | None] = mapped_column(_enum(LoadingMethod))
+    #: Overrides the global max_items_per_container setting for this row.
+    maximum_product_items: Mapped[int | None] = mapped_column(Integer)
+    notes: Mapped[str | None] = mapped_column(Text)
+
+    shipment: Mapped[QuotationShipment] = relationship(back_populates="containers")
+    shipping_line: Mapped[ShippingLine | None] = relationship()
+    allocations: Mapped[list[ShipmentProductAllocation]] = relationship(
+        back_populates="container", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        CheckConstraint("container_count > 0", name="container_count_positive"),
+        CheckConstraint("freight_cost >= 0", name="freight_non_negative"),
+    )
+
+    @property
+    def carrier_name(self) -> str:
+        if self.shipping_line is not None:
+            return self.shipping_line.name
+        return self.custom_shipping_line or "—"
+
+    @property
+    def size_label(self) -> str:
+        from modules.constants import CONTAINER_SIZE_LABELS
+
+        if self.container_size is ContainerSize.CUSTOM and self.custom_container_size:
+            return self.custom_container_size
+        return CONTAINER_SIZE_LABELS[self.container_size]
+
+    @property
+    def type_label(self) -> str:
+        from modules.constants import CONTAINER_TYPE_LABELS
+
+        if self.container_type is ContainerType.CUSTOM and self.custom_container_type:
+            return self.custom_container_type
+        return CONTAINER_TYPE_LABELS[self.container_type]
+
+
+class ShipmentProductAllocation(Base, TimestampMixin):
+    """Which quotation line travels in which container, and how much of it."""
+
+    __tablename__ = "shipment_product_allocations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    shipment_container_id: Mapped[int] = mapped_column(
+        ForeignKey("shipment_containers.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    quotation_item_id: Mapped[int] = mapped_column(
+        ForeignKey("quotation_items.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+
+    quantity_per_container: Mapped[Decimal] = mapped_column(
+        quantity(), nullable=False, default=Decimal("0")
+    )
+    total_allocated_quantity: Mapped[Decimal] = mapped_column(
+        quantity(), nullable=False, default=Decimal("0")
+    )
+
+    bundles_per_container: Mapped[Decimal | None] = mapped_column(quantity())
+    pallets_per_container: Mapped[Decimal | None] = mapped_column(quantity())
+    cases_per_container: Mapped[Decimal | None] = mapped_column(quantity())
+    pieces_per_container: Mapped[Decimal | None] = mapped_column(quantity())
+
+    #: Freight apportioned to this allocation, for landed cost. Internal only.
+    allocated_freight: Mapped[Decimal | None] = mapped_column(money())
+    notes: Mapped[str | None] = mapped_column(Text)
+
+    container: Mapped[ShipmentContainer] = relationship(back_populates="allocations")
+    item: Mapped[QuotationItem] = relationship()
+
+    __table_args__ = (
+        UniqueConstraint("shipment_container_id", "quotation_item_id"),
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Immutability guards
 # --------------------------------------------------------------------------- #
 
@@ -1273,6 +1532,28 @@ def _guard_immutability(session: Session, _flush_context: Any, _instances: Any) 
             raise ImmutableRecordError(
                 f"Revision snapshot #{obj.id} is immutable and cannot be edited."
             )
+
+        elif isinstance(obj, QuotationShipment):
+            parent = obj.quotation
+            if parent is not None and parent.is_locked:
+                raise ImmutableRecordError(
+                    f"The shipping details of issued quotation "
+                    f"{parent.quote_number} {parent.revision_label} cannot be "
+                    "edited. Create a new revision instead."
+                )
+
+        elif isinstance(obj, (ShipmentContainer, ShipmentProductAllocation)):
+            shipment = (
+                obj.shipment if isinstance(obj, ShipmentContainer)
+                else (obj.container.shipment if obj.container else None)
+            )
+            parent = shipment.quotation if shipment else None
+            if parent is not None and parent.is_locked:
+                raise ImmutableRecordError(
+                    f"{type(obj).__name__} belongs to issued quotation "
+                    f"{parent.quote_number} {parent.revision_label} and cannot be "
+                    "edited. Create a new revision instead."
+                )
 
         elif isinstance(obj, (QuotationItem, QuotationCharge, QuotationTerm)):
             parent = obj.quotation

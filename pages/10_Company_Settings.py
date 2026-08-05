@@ -12,14 +12,27 @@ from decimal import Decimal
 
 import streamlit as st
 
-from modules import settings_service
+from modules import settings_service, shipping_service
 from modules.audit_service import record_audit
 from modules.authorization import PermissionDenied
-from modules.constants import SUPPORTED_CURRENCIES, AuditAction, EntityType, Perm
+from modules.constants import (
+    CONTAINER_SIZE_LABELS,
+    CONTAINER_TYPE_LABELS,
+    LOADING_METHOD_LABELS,
+    SUPPORTED_CURRENCIES,
+    AuditAction,
+    ContainerSize,
+    ContainerType,
+    EntityType,
+    Incoterm,
+    LoadingMethod,
+    Perm,
+)
 from modules.database import session_scope
 from modules.document_model import AVAILABLE_COLUMNS, DEFAULT_COLUMNS
 from modules.numbering import NumberFormatError, render, validate_format
 from modules.session import page_header, require_page
+from modules.shipping_service import ShippingError
 from modules.storage import StorageError, build_key, get_storage, validate_upload
 
 user = require_page(Perm.SETTINGS_MANAGE)
@@ -63,6 +76,22 @@ with session_scope() as db:
         ),
         "is_placeholder": settings.is_placeholder,
     }
+    carriers = [
+        {
+            "id": line.id, "name": line.name,
+            "is_active": line.is_active, "sort_order": line.sort_order,
+        }
+        for line in shipping_service.shipping_lines(db, include_inactive=True)
+    ]
+    shipping_defaults = {
+        "incoterm": settings_service.default_incoterm(db),
+        "incoterm_place": settings_service.default_incoterm_place(db),
+        "origin_country": settings_service.default_origin_country(db),
+        "port_of_loading": settings_service.default_port_of_loading(db),
+        "container_size": settings_service.default_container_size(db),
+        "container_type": settings_service.default_container_type(db),
+        "loading_method": settings_service.default_loading_method(db),
+    }
     tunables = {
         "tier_container_scope": settings_service.tier_container_scope(db),
         "piece_pack_tolerance": settings_service.piece_pack_tolerance(db),
@@ -77,8 +106,8 @@ if current["is_placeholder"]:
         "printed at a customer."
     )
 
-identity_tab, document_tab, thresholds_tab = st.tabs(
-    ["Company identity", "Document defaults", "Thresholds"]
+identity_tab, document_tab, thresholds_tab, shipping_tab = st.tabs(
+    ["Company identity", "Document defaults", "Thresholds", "Shipping"]
 )
 
 
@@ -369,3 +398,174 @@ with thresholds_tab:
         "Approval limits per role are on the **Users & Permissions** page. Tax and "
         "exchange rates are maintained by Finance."
     )
+
+
+# --------------------------------------------------------------------------- #
+# Shipping
+# --------------------------------------------------------------------------- #
+
+with shipping_tab:
+    can_manage_lines = user.has(Perm.SHIPPING_LINE_MANAGE)
+
+    st.markdown("##### Shipping lines")
+    st.caption(
+        "The carriers offered when building a container row. A quotation may also "
+        "name a carrier that is not on this list."
+    )
+    st.dataframe(
+        [
+            {
+                "Shipping line": c["name"],
+                "Active": "Yes" if c["is_active"] else "No",
+                "Order": str(c["sort_order"]),
+            }
+            for c in carriers
+        ],
+        width="stretch",
+        hide_index=True,
+    )
+
+    if not can_manage_lines:
+        st.info("Managing shipping lines requires the shipping_line.manage permission.")
+    else:
+        add_col, edit_col = st.columns(2)
+
+        with add_col:
+            st.markdown("###### Add a shipping line")
+            with st.form("add_shipping_line"):
+                new_name = st.text_input("Name *", placeholder="e.g. Hapag-Lloyd")
+                new_order = st.number_input(
+                    "Display order", min_value=0, max_value=999, value=100, step=10
+                )
+                line_added = st.form_submit_button("Add", type="primary")
+
+            if line_added:
+                try:
+                    with session_scope() as db:
+                        shipping_service.create_shipping_line(
+                            db, user, new_name, sort_order=int(new_order)
+                        )
+                except (ShippingError, PermissionDenied) as exc:
+                    st.error(str(exc))
+                else:
+                    st.toast("Shipping line added", icon="✅")
+                    st.rerun()
+
+        with edit_col:
+            st.markdown("###### Edit a shipping line")
+            if not carriers:
+                st.caption("None recorded yet.")
+            else:
+                target = st.selectbox(
+                    "Shipping line", carriers, format_func=lambda c: c["name"]
+                )
+                with st.form("edit_shipping_line"):
+                    edit_name = st.text_input("Name", value=target["name"])
+                    edit_order = st.number_input(
+                        "Display order", min_value=0, max_value=999,
+                        value=int(target["sort_order"]), step=10,
+                    )
+                    edit_active = st.checkbox(
+                        "Offered when building a container",
+                        value=target["is_active"],
+                        help=(
+                            "Turning this off hides the carrier from new quotations. "
+                            "Existing quotations keep the carrier they were booked "
+                            "with."
+                        ),
+                    )
+                    line_saved = st.form_submit_button("Save", type="primary")
+
+                if line_saved:
+                    try:
+                        with session_scope() as db:
+                            shipping_service.update_shipping_line(
+                                db, user, target["id"],
+                                name=edit_name, is_active=edit_active,
+                                sort_order=int(edit_order),
+                            )
+                    except (ShippingError, PermissionDenied) as exc:
+                        st.error(str(exc))
+                    else:
+                        st.toast("Shipping line saved", icon="✅")
+                        st.rerun()
+
+                if st.button(f"Remove {target['name']}"):
+                    try:
+                        with session_scope() as db:
+                            shipping_service.delete_shipping_line(
+                                db, user, target["id"]
+                            )
+                    except (ShippingError, PermissionDenied) as exc:
+                        st.error(str(exc))
+                    else:
+                        st.toast("Shipping line removed", icon="✅")
+                        st.rerun()
+                st.caption(
+                    "Removing a carrier hides it from new quotations but leaves "
+                    "historical ones intact — it is a soft delete, so a quotation "
+                    "booked with it still reads correctly."
+                )
+
+    st.divider()
+    st.markdown("##### Defaults for a new shipment")
+    st.caption(
+        "Applied when shipping is first added to a quotation, and editable there. "
+        "Seeded from the price list: FOB Çerkezköy, 40 ft high-cube dry containers, "
+        "floor loaded."
+    )
+
+    with st.form("shipping_defaults"):
+        default_a, default_b = st.columns(2)
+        with default_a:
+            default_incoterm = st.selectbox(
+                "Incoterms", list(Incoterm),
+                index=list(Incoterm).index(shipping_defaults["incoterm"]),
+            )
+            default_place = st.text_input(
+                "Named place", value=shipping_defaults["incoterm_place"]
+            )
+            default_origin = st.text_input(
+                "Country of origin", value=shipping_defaults["origin_country"]
+            )
+            default_port = st.text_input(
+                "Port of loading", value=shipping_defaults["port_of_loading"]
+            )
+        with default_b:
+            default_size = st.selectbox(
+                "Container size", list(ContainerSize),
+                index=list(ContainerSize).index(shipping_defaults["container_size"]),
+                format_func=lambda s: CONTAINER_SIZE_LABELS[s],
+            )
+            default_type = st.selectbox(
+                "Container type", list(ContainerType),
+                index=list(ContainerType).index(shipping_defaults["container_type"]),
+                format_func=lambda c: CONTAINER_TYPE_LABELS[c],
+            )
+            default_loading = st.selectbox(
+                "Loading method", list(LoadingMethod),
+                index=list(LoadingMethod).index(shipping_defaults["loading_method"]),
+                format_func=lambda m: LOADING_METHOD_LABELS[m],
+            )
+        defaults_saved = st.form_submit_button("Save shipping defaults", type="primary")
+
+    if defaults_saved:
+        try:
+            with session_scope() as db:
+                for key, value in (
+                    ("default_incoterm", default_incoterm.value),
+                    ("default_incoterm_place", default_place.strip()),
+                    ("default_origin_country", default_origin.strip()),
+                    ("default_port_of_loading", default_port.strip()),
+                    ("default_container_size", default_size.value),
+                    ("default_container_type", default_type.value),
+                    ("default_loading_method", default_loading.value),
+                ):
+                    settings_service.set_setting(
+                        db, user, key, value, value_type="string", category="shipping"
+                    )
+        except PermissionDenied as exc:
+            st.error(str(exc))
+        else:
+            st.toast("Shipping defaults saved", icon="✅")
+            st.rerun()

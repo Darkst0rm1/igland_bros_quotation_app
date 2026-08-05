@@ -133,6 +133,60 @@ def snapshot(quotation: Quotation) -> dict[str, Any]:
             }
             for t in sorted(quotation.terms, key=lambda t: t.sort_order)
         ],
+        # Additive. Snapshots taken before container shipping existed simply
+        # lack this key, and compare() treats a missing key as "no change".
+        "shipment": _shipment_snapshot(quotation),
+    }
+
+
+def _shipment_snapshot(quotation: Quotation) -> dict[str, Any] | None:
+    """The shipping plan as issued, or ``None`` when there is none.
+
+    Freight cost is included here: a revision snapshot is an internal record of
+    what was issued, shown only to people who can already view the quotation.
+    It is the *document* that withholds internal freight, not this.
+    """
+    shipment = quotation.shipment
+    if shipment is None:
+        return None
+    return {
+        "incoterm": shipment.incoterm.value if shipment.incoterm else None,
+        "incoterm_place": shipment.incoterm_place,
+        "origin_country": shipment.origin_country,
+        "port_of_loading": shipment.port_of_loading,
+        "port_of_discharge": shipment.port_of_discharge,
+        "final_destination": shipment.final_destination,
+        "freight_method": shipment.freight_method.value,
+        "total_freight": _plain(shipment.total_freight),
+        "freight_currency": shipment.freight_currency,
+        "loading_method": (
+            shipment.loading_method.value if shipment.loading_method else None
+        ),
+        "shipping_notes": shipment.shipping_notes,
+        "containers": [
+            {
+                "carrier": c.carrier_name,
+                "container_size": c.size_label,
+                "container_type": c.type_label,
+                "container_count": _plain(c.container_count),
+                "freight_cost": _plain(c.freight_cost),
+                "port_of_loading": c.port_of_loading,
+                "port_of_discharge": c.port_of_discharge,
+                "transit_days": c.transit_days,
+                "estimated_departure": _plain(c.estimated_departure),
+                "estimated_arrival": _plain(c.estimated_arrival),
+                "allocations": [
+                    {
+                        "line_no": a.item.line_no if a.item else None,
+                        "quantity_per_container": _plain(a.quantity_per_container),
+                        "total_allocated_quantity": _plain(a.total_allocated_quantity),
+                        "bundles_per_container": _plain(a.bundles_per_container),
+                    }
+                    for a in c.allocations
+                ],
+            }
+            for c in sorted(shipment.containers, key=lambda c: c.sort_order)
+        ],
     }
 
 
@@ -311,6 +365,8 @@ def create_revision(
         session.add(_copy_term(term, revised.id))
     session.flush()
 
+    _copy_shipment(session, quotation, revised)
+
     # The superseded revision stops being current but keeps everything else,
     # including its lock. is_current_revision is one of the few fields the
     # immutability guard allows to change on a locked quotation, precisely so
@@ -337,6 +393,120 @@ def create_revision(
         revised.quote_number, next_no, quotation.revision_no,
     )
     return revised
+
+
+def _copy_shipment(
+    session: Session, source: Quotation, revised: Quotation
+) -> None:
+    """Carry the shipping plan onto the new revision.
+
+    Queried rather than read off the relationships, for the same reason lines
+    and charges are: a collection loaded earlier in this session would not
+    include rows written since, and a stale read here would silently drop
+    containers from the revision.
+
+    The freight charge is deliberately not copied — it is derived, and
+    ``sync_freight`` recreates it from the copied container rows.
+    """
+    from modules.models import (
+        QuotationShipment,
+        ShipmentContainer,
+        ShipmentProductAllocation,
+    )
+
+    original = session.execute(
+        select(QuotationShipment).where(QuotationShipment.quotation_id == source.id)
+    ).scalar_one_or_none()
+    if original is None:
+        return
+
+    copy = QuotationShipment(
+        quotation_id=revised.id,
+        incoterm=original.incoterm,
+        incoterm_place=original.incoterm_place,
+        origin_country=original.origin_country,
+        port_of_loading=original.port_of_loading,
+        port_of_discharge=original.port_of_discharge,
+        final_destination=original.final_destination,
+        freight_method=original.freight_method,
+        total_freight=original.total_freight,
+        freight_currency=original.freight_currency,
+        freight_taxable=original.freight_taxable,
+        loading_method=original.loading_method,
+        shipping_notes=original.shipping_notes,
+        show_on_document=original.show_on_document,
+        customer_visible_freight=original.customer_visible_freight,
+        created_by_id=revised.created_by_id,
+        updated_by_id=revised.updated_by_id,
+    )
+    session.add(copy)
+    session.flush()
+
+    # Line numbers are stable across a revision, so allocations are re-pointed
+    # by line number rather than by the superseded item id.
+    new_items = {
+        item.line_no: item.id
+        for item in session.execute(
+            select(QuotationItem).where(QuotationItem.quotation_id == revised.id)
+        ).scalars()
+    }
+
+    containers = session.execute(
+        select(ShipmentContainer)
+        .where(ShipmentContainer.quotation_shipment_id == original.id)
+        .order_by(ShipmentContainer.sort_order)
+    ).scalars().all()
+
+    for container in containers:
+        new_container = ShipmentContainer(
+            quotation_shipment_id=copy.id,
+            sort_order=container.sort_order,
+            shipping_line_id=container.shipping_line_id,
+            custom_shipping_line=container.custom_shipping_line,
+            container_size=container.container_size,
+            custom_container_size=container.custom_container_size,
+            container_type=container.container_type,
+            custom_container_type=container.custom_container_type,
+            container_count=container.container_count,
+            freight_cost=container.freight_cost,
+            freight_currency=container.freight_currency,
+            port_of_loading=container.port_of_loading,
+            port_of_discharge=container.port_of_discharge,
+            estimated_departure=container.estimated_departure,
+            estimated_arrival=container.estimated_arrival,
+            transit_days=container.transit_days,
+            loading_method=container.loading_method,
+            maximum_product_items=container.maximum_product_items,
+            notes=container.notes,
+        )
+        session.add(new_container)
+        session.flush()
+
+        allocations = session.execute(
+            select(ShipmentProductAllocation).where(
+                ShipmentProductAllocation.shipment_container_id == container.id
+            )
+        ).scalars().all()
+        for allocation in allocations:
+            old_item = session.get(QuotationItem, allocation.quotation_item_id)
+            target = new_items.get(old_item.line_no) if old_item else None
+            if target is None:
+                continue
+            session.add(
+                ShipmentProductAllocation(
+                    shipment_container_id=new_container.id,
+                    quotation_item_id=target,
+                    quantity_per_container=allocation.quantity_per_container,
+                    total_allocated_quantity=allocation.total_allocated_quantity,
+                    bundles_per_container=allocation.bundles_per_container,
+                    pallets_per_container=allocation.pallets_per_container,
+                    cases_per_container=allocation.cases_per_container,
+                    pieces_per_container=allocation.pieces_per_container,
+                    allocated_freight=allocation.allocated_freight,
+                    notes=allocation.notes,
+                )
+            )
+    session.flush()
 
 
 def _copy_item(item: QuotationItem, quotation_id: int) -> QuotationItem:
