@@ -323,3 +323,105 @@ class TestSelfApproval:
         assert can_approve_quotation(
             manager, quote, requested_by_id=quotations["alice"].id
         )
+
+
+class TestPermissionSync:
+    """A permission added in code is reference data, not schema.
+
+    A migration does not carry it, so the schema check passes while the
+    feature it guards is invisible: every ``has()`` returns False and the
+    controls are simply not drawn. Container shipping shipped in exactly that
+    state — tables migrated, nobody able to reach them.
+    """
+
+    def test_missing_permission_is_created_and_granted(self, session, seeded):
+        from modules.models import Permission, Role
+        from seeds.seed_roles_permissions import sync_permissions
+
+        row = session.query(Permission).filter_by(code=Perm.SHIPMENT_EDIT.value).one()
+        for role in session.query(Role).all():
+            role.permissions = [p for p in role.permissions if p.code != row.code]
+        session.delete(row)
+        session.commit()
+
+        changes = sync_permissions(session)
+        session.commit()
+
+        assert f"+permission {Perm.SHIPMENT_EDIT.value}" in changes
+        restored = session.query(Permission).filter_by(
+            code=Perm.SHIPMENT_EDIT.value
+        ).one()
+        admin = session.query(Role).filter_by(code=RoleCode.SYS_ADMIN.value).one()
+        assert restored in admin.permissions
+
+    def test_sync_is_a_no_op_when_already_in_step(self, session, seeded):
+        from seeds.seed_roles_permissions import sync_permissions
+
+        assert sync_permissions(session) == []
+
+    def test_sync_revokes_a_grant_the_matrix_no_longer_has(self, session, seeded):
+        """Drift is corrected in both directions, so a permission removed from
+        the matrix is actually taken away rather than lingering."""
+        from modules.models import Permission, Role
+        from seeds.seed_roles_permissions import sync_permissions
+
+        sales = session.query(Role).filter_by(code=RoleCode.SALES.value).one()
+        stray = session.query(Permission).filter_by(
+            code=Perm.USER_MANAGE.value
+        ).one()
+        sales.permissions = [*sales.permissions, stray]
+        session.commit()
+
+        changes = sync_permissions(session)
+        session.commit()
+
+        assert f"-{RoleCode.SALES.value}:{Perm.USER_MANAGE.value}" in changes
+        assert stray not in sales.permissions
+
+    def test_sync_leaves_approval_limits_alone(self, session, seeded):
+        """They are operator-configured. A ceiling silently reverting to a
+        default shows up as quotations being waved through, with nothing on
+        screen to say why."""
+        from modules.models import Role
+        from seeds.seed_roles_permissions import sync_permissions
+
+        sales = session.query(Role).filter_by(code=RoleCode.SALES.value).one()
+        sales.max_discount_pct = D("12.5")
+        sales.max_quote_value = D("99000")
+        session.commit()
+
+        sync_permissions(session)
+        session.commit()
+
+        session.refresh(sales)
+        assert sales.max_discount_pct == D("12.5")
+        assert sales.max_quote_value == D("99000")
+
+    def test_reseeding_does_not_reset_configured_limits(self, session, seeded):
+        """The full seeder is documented as safe to run repeatedly, so it must
+        not undo what Finance set in the UI."""
+        from modules.models import Role
+        from seeds import seed_roles_permissions
+
+        sales = session.query(Role).filter_by(code=RoleCode.SALES.value).one()
+        sales.max_discount_pct = D("12.5")
+        session.commit()
+
+        permissions = seed_roles_permissions.seed_permissions(session)
+        seed_roles_permissions.seed_roles(session, permissions)
+        session.commit()
+
+        session.refresh(sales)
+        assert sales.max_discount_pct == D("12.5")
+
+    def test_every_permission_in_code_reaches_a_seeded_database(self, session, seeded):
+        """Catches the gap at the source: a new Perm that no role can hold is
+        a feature nobody can use."""
+        from modules.models import Permission
+
+        in_db = {p.code for p in session.query(Permission).all()}
+        assert {p.value for p in Perm} <= in_db
+
+        grantable = {p.value for granted in ROLE_PERMISSIONS.values() for p in granted}
+        ungranted = {p.value for p in Perm} - grantable
+        assert ungranted == set(), f"permissions no role holds: {sorted(ungranted)}"

@@ -72,6 +72,36 @@ def _database_identity() -> str:
     return f"{url.drivername} on {url.host or '?'}/{url.database or '?'}"
 
 
+def _sync_permissions() -> None:
+    """Reconcile the database's permissions with this code's, once per process.
+
+    The schema check above catches a database that is behind on *migrations*.
+    It cannot catch one that is behind on *permissions*, because permissions
+    are reference data and a migration does not carry them — the revision
+    matches, the check passes, and a feature added since the last seed is
+    simply not drawn for anybody. That is how the container-shipping tab came
+    to render its empty state above an "add a container" form that no user,
+    including the administrator, had the permission to see.
+
+    Failures here are logged and swallowed. A permission that could not be
+    written is a feature that stays hidden; it is not a reason to refuse to
+    start, and on a read-only replica it would be the wrong call entirely.
+    """
+    if st.session_state.get("_permissions_synced"):
+        return
+    try:
+        from seeds.seed_roles_permissions import sync_permissions
+
+        with session_scope() as db:
+            changed = sync_permissions(db)
+        if changed:
+            log.info("Permissions brought up to date: %s", ", ".join(changed))
+    except Exception:  # pragma: no cover - defensive
+        log.exception("Could not sync permissions; some features may stay hidden")
+    else:
+        st.session_state["_permissions_synced"] = True
+
+
 def _startup_check() -> tuple[bool, str | None]:
     """Verify the database schema matches this code.
 
@@ -110,6 +140,7 @@ def _startup_check() -> tuple[bool, str | None]:
         )
 
     if problem is None:
+        _sync_permissions()
         st.session_state["_schema_verified"] = True
         log.info("Startup OK (env=%s, schema=%s, db=%s)", settings.app_env, applied, where)
         return True, None

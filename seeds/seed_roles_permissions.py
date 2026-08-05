@@ -99,11 +99,16 @@ def seed_roles(session: Session, permissions: dict[str, Permission]) -> dict[str
             role = Role(code=role_code.value, is_system=True)
             session.add(role)
             existing[role_code.value] = role
+            # Limits are starting points, applied once. Finance edits them in
+            # the UI under approval_limits.manage, and re-running the seeder
+            # must not quietly undo that: an approval ceiling reverting to a
+            # default would show up as quotations being waved through, with
+            # nothing on screen to say why.
+            for field, value in ROLE_LIMITS[role_code].items():
+                setattr(role, field, value)
 
         role.name = ROLE_DISPLAY_NAMES[role_code]
         role.description = ROLE_DESCRIPTIONS[role_code]
-        for field, value in ROLE_LIMITS[role_code].items():
-            setattr(role, field, value)
 
         # Reconcile grants to the matrix rather than merely adding to them, so
         # a permission removed from the matrix is actually revoked.
@@ -154,6 +159,58 @@ def seed_bootstrap_admin(
     session.flush()
     log.info("Bootstrap administrator created: %s", username)
     return user, temporary
+
+
+def sync_permissions(session: Session) -> list[str]:
+    """Bring the database's permissions and role grants up to the code's.
+
+    A permission added to :class:`~modules.constants.Perm` is reference data,
+    not schema, so a migration does not carry it. Until this runs, the feature
+    it guards is invisible: every ``user.has(...)`` returns False and the
+    controls simply are not drawn. Nothing errors, which is what makes it hard
+    to spot — the container-shipping tab shipped in exactly this state, with
+    the tables migrated and not one person able to reach them.
+
+    Deliberately narrower than :func:`seed_roles`: it touches permissions and
+    grants only, never the approval limits, which are operator-configured.
+
+    Returns a description of what changed, empty when already in step.
+    """
+    changes: list[str] = []
+
+    existing = {p.code: p for p in session.execute(select(Permission)).scalars()}
+    for perm in Perm:
+        if perm.value in existing:
+            continue
+        row = Permission(
+            code=perm.value,
+            category=PERMISSION_CATEGORIES.get(perm, "general"),
+            description=perm.name.replace("_", " ").title(),
+        )
+        session.add(row)
+        existing[perm.value] = row
+        changes.append(f"+permission {perm.value}")
+    session.flush()
+
+    roles = {r.code: r for r in session.execute(select(Role)).scalars()}
+    for role_code, granted in ROLE_PERMISSIONS.items():
+        role = roles.get(role_code.value)
+        if role is None:
+            continue  # seed_roles creates roles; this only reconciles grants.
+        wanted = {p.value for p in granted}
+        held = {p.code for p in role.permissions}
+        if wanted == held:
+            continue
+        for code in sorted(wanted - held):
+            changes.append(f"+{role_code.value}:{code}")
+        for code in sorted(held - wanted):
+            changes.append(f"-{role_code.value}:{code}")
+        role.permissions = [existing[code] for code in sorted(wanted)]
+    session.flush()
+
+    if changes:
+        log.info("Permissions synced: %s", ", ".join(changes))
+    return changes
 
 
 def run(session: Session) -> tuple[User, str | None]:

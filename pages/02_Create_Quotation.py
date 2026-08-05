@@ -765,10 +765,26 @@ with shipping_tab:
     can_edit_freight = user.has(Perm.SHIPMENT_EDIT_FREIGHT) and editable
 
     if shipment is None:
-        st.info(
-            "No shipping arrangement has been recorded. Add a container below to "
-            "start one — the quotation works perfectly well without it."
-        )
+        # The message has to match what this user can actually do. Pointing at
+        # a form that is not drawn — because the permission is missing or the
+        # quotation is no longer editable — reads as a broken page rather than
+        # as a restriction, and sends people looking for a fault that is not
+        # there.
+        if can_ship:
+            st.info(
+                "No shipping arrangement has been recorded. Add a container below "
+                "to start one — the quotation works perfectly well without it."
+            )
+        elif not editable:
+            st.info(
+                "No shipping arrangement was recorded on this quotation, and it "
+                "can no longer be edited."
+            )
+        else:
+            st.info(
+                "No shipping arrangement has been recorded. Adding one requires "
+                "the shipment.edit permission."
+            )
     else:
         summary_a, summary_b, summary_c = st.columns(3)
         summary_a.metric("Containers", format_quantity(total_container_count))
