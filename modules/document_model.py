@@ -114,6 +114,30 @@ class DocumentTerm:
 
 
 @dataclass(frozen=True)
+class DocumentShipping:
+    """The customer-facing view of the shipping arrangement.
+
+    Freight cost appears **only** when the shipment is explicitly marked
+    customer-visible. There is no field for internal freight, so no renderer
+    can print it by accident.
+    """
+
+    columns: list[str]
+    headings: list[str]
+    rows: list[list[str]]
+    summary: list[tuple[str, str]] = field(default_factory=list)
+    notes: str = ""
+    freight_statement: str = ""
+
+    @property
+    def numeric_indexes(self) -> list[int]:
+        return [
+            i for i, key in enumerate(self.columns)
+            if key in {"quantity", "transit", "freight"}
+        ]
+
+
+@dataclass(frozen=True)
 class QuotationDocument:
     quote_number: str
     revision_label: str
@@ -131,6 +155,9 @@ class QuotationDocument:
     totals: list[DocumentTotal]
     terms: list[DocumentTerm]
     customer_notes: str = ""
+    #: ``None`` unless the quotation has a shipment marked to show. Existing
+    #: quotations therefore produce byte-identical documents.
+    shipping: DocumentShipping | None = None
 
     prepared_by: str = ""
     prepared_by_title: str = ""
@@ -168,6 +195,104 @@ class QuotationDocument:
 # --------------------------------------------------------------------------- #
 # Building
 # --------------------------------------------------------------------------- #
+
+#: Columns for the shipping table. Freight is included only when the shipment
+#: says the customer may see it.
+SHIPPING_COLUMNS: dict[str, str] = {
+    "carrier": "Shipping line",
+    "size": "Container size",
+    "type": "Container type",
+    "quantity": "Quantity",
+    "loading": "Port of loading",
+    "discharge": "Port of discharge",
+    "transit": "Transit time",
+    "freight": "Freight",
+}
+
+
+def _build_shipping(session: Session, quotation: Quotation) -> DocumentShipping | None:
+    """The shipping section, or ``None`` when it should not appear.
+
+    Opt-in per quotation. Anything not filled in is dropped from the table
+    rather than printed empty, so a partly-completed shipment still reads
+    cleanly.
+    """
+    from modules.constants import FREIGHT_METHOD_LABELS, FreightMethod
+
+    shipment = quotation.shipment
+    if shipment is None or not shipment.show_on_document:
+        return None
+
+    containers = sorted(shipment.containers, key=lambda c: c.sort_order)
+    if not containers:
+        return None
+
+    show_freight = shipment.customer_visible_freight
+    wanted = ["carrier", "size", "type", "quantity"]
+    if any(c.port_of_loading for c in containers) or shipment.port_of_loading:
+        wanted.append("loading")
+    if any(c.port_of_discharge for c in containers) or shipment.port_of_discharge:
+        wanted.append("discharge")
+    if any(c.transit_days for c in containers):
+        wanted.append("transit")
+    if show_freight:
+        wanted.append("freight")
+
+    rows: list[list[str]] = []
+    for container in containers:
+        values = {
+            "carrier": container.carrier_name,
+            "size": container.size_label,
+            "type": container.type_label,
+            "quantity": format_quantity(container.container_count),
+            "loading": container.port_of_loading or shipment.port_of_loading or "",
+            "discharge": container.port_of_discharge or shipment.port_of_discharge or "",
+            "transit": (
+                f"{container.transit_days} days" if container.transit_days else ""
+            ),
+            "freight": (
+                format_money(container.freight_cost, shipment.freight_currency)
+                if show_freight else ""
+            ),
+        }
+        rows.append([values[key] for key in wanted])
+
+    summary: list[tuple[str, str]] = []
+    if shipment.incoterm:
+        place = f" {shipment.incoterm_place}" if shipment.incoterm_place else ""
+        summary.append(("Incoterms", f"{shipment.incoterm.value}{place} (Incoterms 2020)"))
+    if shipment.origin_country:
+        summary.append(("Country of origin", shipment.origin_country))
+    if shipment.final_destination:
+        summary.append(("Final destination", shipment.final_destination))
+    if shipment.loading_method:
+        from modules.constants import LOADING_METHOD_LABELS
+
+        summary.append(("Loading", LOADING_METHOD_LABELS[shipment.loading_method]))
+    total = shipment.total_containers
+    if total:
+        summary.append(("Total containers", format_quantity(total)))
+
+    # Only the *included* case makes a statement about price. Internal-only
+    # freight says nothing at all, because the customer is not being told
+    # anything about it.
+    freight_statement = ""
+    if shipment.freight_method is FreightMethod.INCLUDED:
+        freight_statement = "Freight is included in the quoted prices."
+    elif shipment.freight_method is FreightMethod.ADDED_SEPARATELY:
+        freight_statement = (
+            "Freight is quoted separately and appears in the totals above."
+        )
+
+    return DocumentShipping(
+        columns=wanted,
+        headings=[SHIPPING_COLUMNS[key] for key in wanted],
+        rows=rows,
+        summary=summary,
+        notes=shipment.shipping_notes or "",
+        freight_statement=freight_statement,
+    )
+
 
 def _column_set(session: Session) -> list[str]:
     settings = settings_service.get_company_settings(session)
@@ -358,6 +483,7 @@ def build_document(
         totals=totals,
         terms=terms,
         customer_notes=quotation.customer_notes or "",
+        shipping=_build_shipping(session, quotation),
         prepared_by=prepared_by,
         prepared_by_title=prepared_by_title,
         approved_by=approved_by,

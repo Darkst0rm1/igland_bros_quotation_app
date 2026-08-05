@@ -24,18 +24,28 @@ from modules import (
     quotation_service,
     revision_service,
     settings_service,
+    shipping_service,
 )
 from modules.approval_service import ApprovalError
 from modules.audit_service import record_audit
 from modules.authorization import PermissionDenied, can_edit_quotation, can_view_costs
 from modules.constants import (
     CHARGE_TYPE_DISPLAY_NAMES,
+    CONTAINER_SIZE_LABELS,
+    CONTAINER_TYPE_LABELS,
+    FREIGHT_METHOD_LABELS,
+    LOADING_METHOD_LABELS,
     STATUS_DISPLAY_NAMES,
     SUPPORTED_CURRENCIES,
     AuditAction,
     ChargeType,
+    ContainerSize,
+    ContainerType,
     CustomerResponse,
     EntityType,
+    FreightMethod,
+    Incoterm,
+    LoadingMethod,
     Perm,
     PricingBasis,
     QuotationStatus,
@@ -45,6 +55,7 @@ from modules.database import session_scope
 from modules.models import CustomerResponseLog, Quotation, TermTemplate
 from modules.quotation_service import QuotationError
 from modules.revision_service import RevisionError
+from modules.shipping_service import ShippingError
 from modules.repositories import (
     get_price_tiers,
     search_customers,
@@ -241,6 +252,66 @@ with session_scope() as db:
         }
         for t in quotation.terms
     ]
+    shipment_row = shipping_service.get_shipment(db, quotation_id)
+    shipment = None
+    container_rows: list[dict] = []
+    if shipment_row is not None:
+        shipment = {
+            "id": shipment_row.id,
+            "incoterm": shipment_row.incoterm,
+            "incoterm_place": shipment_row.incoterm_place or "",
+            "origin_country": shipment_row.origin_country or "",
+            "port_of_loading": shipment_row.port_of_loading or "",
+            "port_of_discharge": shipment_row.port_of_discharge or "",
+            "final_destination": shipment_row.final_destination or "",
+            "freight_method": shipment_row.freight_method,
+            "total_freight": shipment_row.total_freight,
+            "freight_currency": shipment_row.freight_currency,
+            "freight_taxable": shipment_row.freight_taxable,
+            "loading_method": shipment_row.loading_method,
+            "shipping_notes": shipment_row.shipping_notes or "",
+            "show_on_document": shipment_row.show_on_document,
+            "customer_visible_freight": shipment_row.customer_visible_freight,
+        }
+        container_rows = [
+            {
+                "id": c.id,
+                "carrier": c.carrier_name,
+                "shipping_line_id": c.shipping_line_id,
+                "custom_shipping_line": c.custom_shipping_line or "",
+                "container_size": c.container_size,
+                "container_type": c.container_type,
+                "size_label": c.size_label,
+                "type_label": c.type_label,
+                "container_count": c.container_count,
+                "freight_cost": c.freight_cost,
+                "port_of_loading": c.port_of_loading or "",
+                "port_of_discharge": c.port_of_discharge or "",
+                "transit_days": c.transit_days,
+                "estimated_departure": c.estimated_departure,
+                "estimated_arrival": c.estimated_arrival,
+                "notes": c.notes or "",
+                "allocations": [
+                    {
+                        "id": a.id,
+                        "line_no": a.item.line_no if a.item else None,
+                        "size_label": a.item.size_label if a.item else "",
+                        "quantity_per_container": a.quantity_per_container,
+                        "total_allocated_quantity": a.total_allocated_quantity,
+                        "bundles_per_container": a.bundles_per_container,
+                        "pieces_per_container": a.pieces_per_container,
+                        "allocated_freight": a.allocated_freight,
+                    }
+                    for a in c.allocations
+                ],
+            }
+            for c in sorted(shipment_row.containers, key=lambda c: c.sort_order)
+        ]
+    carriers = [
+        {"id": line.id, "name": line.name}
+        for line in shipping_service.shipping_lines(db)
+    ]
+    total_container_count = shipping_service.total_containers(db, quotation_id)
     warnings = pricing_service.evaluate_quotation(db, quotation)
     problems = quotation_service.validate_for_submission(db, quotation)
     tiers = [(t.code, t.name) for t in get_price_tiers(db)]
@@ -253,6 +324,7 @@ with session_scope() as db:
     ]
 
 ccy = header["currency"]
+container_row_count = len(container_rows)
 
 page_header(
     header["display_number"],
@@ -312,10 +384,12 @@ with st.sidebar:
 # --------------------------------------------------------------------------- #
 
 (
-    detail_tab, lines_tab, charges_tab, terms_tab, review_tab, tracking_tab
+    detail_tab, lines_tab, shipping_tab, charges_tab, terms_tab,
+    review_tab, tracking_tab
 ) = st.tabs(
-    ["Details", f"Lines ({len(lines)})", f"Charges ({len(charges)})",
-     f"Terms ({len(terms)})", "Review & send", "Customer response"]
+    ["Details", f"Lines ({len(lines)})", f"Shipping ({container_row_count})",
+     f"Charges ({len(charges)})", f"Terms ({len(terms)})",
+     "Review & send", "Customer response"]
 )
 
 
@@ -678,6 +752,411 @@ with lines_tab:
                 for issue in issues:
                     st.warning(issue)
                 st.rerun()
+
+
+
+# --------------------------------------------------------------------------- #
+# Container shipping & logistics
+# --------------------------------------------------------------------------- #
+
+with shipping_tab:
+    can_ship = user.has(Perm.SHIPMENT_EDIT) and editable
+    can_see_freight = user.has(Perm.SHIPMENT_VIEW_FREIGHT)
+    can_edit_freight = user.has(Perm.SHIPMENT_EDIT_FREIGHT) and editable
+
+    if shipment is None:
+        st.info(
+            "No shipping arrangement has been recorded. Add a container below to "
+            "start one — the quotation works perfectly well without it."
+        )
+    else:
+        summary_a, summary_b, summary_c = st.columns(3)
+        summary_a.metric("Containers", format_quantity(total_container_count))
+        summary_b.metric(
+            "Freight method",
+            FREIGHT_METHOD_LABELS[shipment["freight_method"]].split(" (")[0],
+        )
+        if can_see_freight:
+            summary_c.metric(
+                "Total freight",
+                format_money(shipment["total_freight"], shipment["freight_currency"]),
+            )
+        else:
+            summary_c.metric("Total freight", "—")
+            st.caption("Freight figures require the shipment.view_freight permission.")
+
+    if container_rows:
+        st.markdown("##### Containers")
+        table = []
+        for row in container_rows:
+            entry = {
+                "Shipping line": row["carrier"],
+                "Size": row["size_label"],
+                "Type": row["type_label"],
+                "Qty": format_quantity(row["container_count"]),
+                "Loading": row["port_of_loading"] or "—",
+                "Discharge": row["port_of_discharge"] or "—",
+                "Transit": f"{row['transit_days']} days" if row["transit_days"] else "—",
+                "Departs": format_date(row["estimated_departure"]),
+                "Arrives": format_date(row["estimated_arrival"]),
+                "Products": len(row["allocations"]),
+            }
+            if can_see_freight:
+                entry["Freight / container"] = format_money(
+                    row["freight_cost"], shipment["freight_currency"]
+                )
+            table.append(entry)
+        st.dataframe(table, width="stretch", hide_index=True)
+
+    # ----------------------------------------------------------------- #
+    # Add a container
+    # ----------------------------------------------------------------- #
+
+    if can_ship:
+        with st.expander("Add a container", expanded=not container_rows):
+            with st.form("add_container"):
+                row_a, row_b, row_c = st.columns(3)
+                with row_a:
+                    carrier_names = [c["name"] for c in carriers] + ["Other"]
+                    carrier_choice = st.selectbox("Shipping line", carrier_names)
+                    custom_carrier = st.text_input(
+                        "Carrier name (when Other)", placeholder="Only used for Other"
+                    )
+                    container_size = st.selectbox(
+                        "Container size",
+                        list(ContainerSize),
+                        index=list(ContainerSize).index(ContainerSize.FORTY_FT_HC),
+                        format_func=lambda s: CONTAINER_SIZE_LABELS[s],
+                    )
+                    custom_size = st.text_input("Custom size (when Custom)")
+                with row_b:
+                    container_type = st.selectbox(
+                        "Container type",
+                        list(ContainerType),
+                        index=list(ContainerType).index(ContainerType.DRY),
+                        format_func=lambda c: CONTAINER_TYPE_LABELS[c],
+                    )
+                    custom_type = st.text_input("Custom type (when Custom)")
+                    container_count = st.number_input(
+                        "Number of containers", min_value=1, value=1, step=1
+                    )
+                    freight_cost = st.number_input(
+                        "Freight cost per container",
+                        min_value=0.0, step=100.0, format="%.2f", value=0.0,
+                        disabled=not can_edit_freight,
+                        help=(
+                            None if can_edit_freight
+                            else "Editing freight requires the shipment.edit_freight permission."
+                        ),
+                    )
+                with row_c:
+                    port_loading = st.text_input("Port of loading")
+                    port_discharge = st.text_input("Port of discharge")
+                    departure = st.date_input("Estimated departure", value=None)
+                    transit = st.number_input(
+                        "Transit time (days)", min_value=0, value=0, step=1,
+                        help="Leave at 0 to derive it from the departure and arrival dates.",
+                    )
+                arrival = st.date_input("Estimated arrival", value=None)
+                max_items = st.number_input(
+                    "Maximum product items in this container", min_value=0, value=0,
+                    help=(
+                        "Overrides the global setting for this row. 0 uses the global "
+                        "value, which the price list sets at three."
+                    ),
+                )
+                container_notes = st.text_input("Notes")
+                added = st.form_submit_button("Add container", type="primary")
+
+            if added:
+                try:
+                    line_id = next(
+                        (c["id"] for c in carriers if c["name"] == carrier_choice), None
+                    )
+                    with session_scope() as db:
+                        shipping_service.add_container(
+                            db, user, db.get(Quotation, quotation_id),
+                            shipping_line_id=line_id,
+                            custom_shipping_line=custom_carrier or None,
+                            container_size=container_size,
+                            custom_container_size=custom_size or None,
+                            container_type=container_type,
+                            custom_container_type=custom_type or None,
+                            container_count=Decimal(str(container_count)),
+                            freight_cost=Decimal(str(freight_cost)),
+                            port_of_loading=port_loading or None,
+                            port_of_discharge=port_discharge or None,
+                            estimated_departure=departure,
+                            estimated_arrival=arrival,
+                            transit_days=int(transit) or None,
+                            maximum_product_items=int(max_items) or None,
+                            notes=container_notes or None,
+                        )
+                except (ShippingError, QuotationError, PermissionDenied) as exc:
+                    st.error(str(exc))
+                else:
+                    st.toast("Container added", icon="✅")
+                    st.rerun()
+
+    # ----------------------------------------------------------------- #
+    # Edit / allocate
+    # ----------------------------------------------------------------- #
+
+    if container_rows and can_ship:
+        st.divider()
+        picked_container = st.selectbox(
+            "Work on a container",
+            container_rows,
+            format_func=lambda r: (
+                f"{r['carrier']} — {r['size_label']} {r['type_label']} "
+                f"x{format_quantity(r['container_count'])}"
+            ),
+        )
+
+        act_a, act_b, act_c = st.columns(3)
+        with act_a:
+            new_count = st.number_input(
+                "Number of containers", min_value=1,
+                value=int(picked_container["container_count"]), step=1,
+                key="edit_container_count",
+            )
+        with act_b:
+            new_freight = st.number_input(
+                "Freight per container", min_value=0.0, step=100.0, format="%.2f",
+                value=float(picked_container["freight_cost"]),
+                disabled=not can_edit_freight, key="edit_container_freight",
+            )
+        with act_c:
+            new_transit = st.number_input(
+                "Transit days", min_value=0,
+                value=int(picked_container["transit_days"] or 0), step=1,
+                key="edit_container_transit",
+            )
+
+        button_a, button_b, button_c = st.columns(3)
+        with button_a:
+            if st.button("Save container", type="primary"):
+                try:
+                    changes = {
+                        "container_count": Decimal(str(new_count)),
+                        "transit_days": int(new_transit) or None,
+                    }
+                    if can_edit_freight:
+                        changes["freight_cost"] = Decimal(str(new_freight))
+                    with session_scope() as db:
+                        shipping_service.update_container(
+                            db, user, db.get(Quotation, quotation_id),
+                            picked_container["id"], **changes,
+                        )
+                except (ShippingError, QuotationError, PermissionDenied) as exc:
+                    st.error(str(exc))
+                else:
+                    st.toast("Container saved", icon="✅")
+                    st.rerun()
+        with button_b:
+            if st.button("Duplicate container"):
+                with session_scope() as db:
+                    shipping_service.duplicate_container(
+                        db, user, db.get(Quotation, quotation_id), picked_container["id"]
+                    )
+                st.rerun()
+        with button_c:
+            if st.button("Remove container"):
+                with session_scope() as db:
+                    shipping_service.remove_container(
+                        db, user, db.get(Quotation, quotation_id), picked_container["id"]
+                    )
+                st.rerun()
+
+        st.markdown("###### Products in this container")
+        if picked_container["allocations"]:
+            allocation_table = [
+                {
+                    "Line": a["line_no"],
+                    "Product": a["size_label"],
+                    "Per container": format_quantity(a["quantity_per_container"]),
+                    "Bundles / container": format_quantity(a["bundles_per_container"]),
+                    "Pieces / container": (
+                        format_quantity(a["pieces_per_container"])
+                        if a["pieces_per_container"] is not None else "unknown"
+                    ),
+                    "Total allocated": format_quantity(a["total_allocated_quantity"]),
+                    **(
+                        {"Freight share": format_money(
+                            a["allocated_freight"], shipment["freight_currency"]
+                        )} if can_see_freight else {}
+                    ),
+                }
+                for a in picked_container["allocations"]
+            ]
+            st.dataframe(allocation_table, width="stretch", hide_index=True)
+            if any(a["pieces_per_container"] is None for a in picked_container["allocations"]):
+                st.caption(
+                    "Pieces per container reads *unknown* where the number of units in "
+                    "a bundle has not been recorded — the source workbook does not "
+                    "state it, and a guessed figure could reach a customer document. "
+                    "Set it on **Products & Pricing**."
+                )
+        else:
+            st.caption("No products assigned to this container yet.")
+
+        if lines:
+            allocate_a, allocate_b = st.columns([2, 1])
+            with allocate_a:
+                allocate_line = st.selectbox(
+                    "Assign a quotation line",
+                    lines,
+                    format_func=lambda ln: f"{ln['line_no']}. {ln['size_label']}",
+                    key="allocate_line",
+                )
+            with allocate_b:
+                per_container = st.number_input(
+                    "Quantity per container (0 = derive)",
+                    min_value=0.0, step=100.0, value=0.0,
+                    help=(
+                        "Left at 0, the figure comes from the recorded "
+                        "bundles-per-container for this product."
+                    ),
+                )
+            if st.button("Assign to container"):
+                try:
+                    with session_scope() as db:
+                        shipping_service.allocate_product(
+                            db, user, db.get(Quotation, quotation_id),
+                            picked_container["id"], allocate_line["id"],
+                            quantity_per_container=(
+                                Decimal(str(per_container)) if per_container > 0 else None
+                            ),
+                        )
+                except (ShippingError, QuotationError, PermissionDenied) as exc:
+                    st.error(str(exc))
+                else:
+                    st.toast("Product assigned", icon="✅")
+                    st.rerun()
+
+    # ----------------------------------------------------------------- #
+    # Route, freight method and document options
+    # ----------------------------------------------------------------- #
+
+    if shipment is not None and can_ship:
+        st.divider()
+        st.markdown("##### Route and freight")
+
+        with st.form("shipment_details"):
+            route_a, route_b = st.columns(2)
+            with route_a:
+                incoterm = st.selectbox(
+                    "Incoterms", list(Incoterm),
+                    index=(
+                        list(Incoterm).index(shipment["incoterm"])
+                        if shipment["incoterm"] else list(Incoterm).index(Incoterm.FOB)
+                    ),
+                )
+                incoterm_place = st.text_input(
+                    "Named place", value=shipment["incoterm_place"]
+                )
+                origin_country = st.text_input(
+                    "Country of origin", value=shipment["origin_country"]
+                )
+                loading_method = st.selectbox(
+                    "Loading method", list(LoadingMethod),
+                    index=(
+                        list(LoadingMethod).index(shipment["loading_method"])
+                        if shipment["loading_method"]
+                        else list(LoadingMethod).index(LoadingMethod.FLOOR_LOADED)
+                    ),
+                    format_func=lambda m: LOADING_METHOD_LABELS[m],
+                )
+            with route_b:
+                port_of_loading = st.text_input(
+                    "Port of loading", value=shipment["port_of_loading"]
+                )
+                port_of_discharge = st.text_input(
+                    "Port of discharge", value=shipment["port_of_discharge"]
+                )
+                final_destination = st.text_input(
+                    "Final destination", value=shipment["final_destination"]
+                )
+                freight_method = st.selectbox(
+                    "Freight method", list(FreightMethod),
+                    index=list(FreightMethod).index(shipment["freight_method"]),
+                    format_func=lambda m: FREIGHT_METHOD_LABELS[m],
+                    disabled=not can_edit_freight,
+                )
+
+            shipping_notes = st.text_area(
+                "Shipping notes", value=shipment["shipping_notes"]
+            )
+            doc_a, doc_b = st.columns(2)
+            with doc_a:
+                show_on_document = st.checkbox(
+                    "Show shipping details on the customer document",
+                    value=shipment["show_on_document"],
+                )
+            with doc_b:
+                visible_freight = st.checkbox(
+                    "Show freight cost on the document",
+                    value=shipment["customer_visible_freight"],
+                    help=(
+                        "Off by default. Internal freight never appears on a customer "
+                        "document unless this is ticked."
+                    ),
+                )
+            saved_shipment = st.form_submit_button("Save shipping details", type="primary")
+
+        if saved_shipment:
+            try:
+                changes = {
+                    "incoterm": incoterm,
+                    "incoterm_place": incoterm_place or None,
+                    "origin_country": origin_country or None,
+                    "port_of_loading": port_of_loading or None,
+                    "port_of_discharge": port_of_discharge or None,
+                    "final_destination": final_destination or None,
+                    "loading_method": loading_method,
+                    "shipping_notes": shipping_notes or None,
+                    "show_on_document": show_on_document,
+                    "customer_visible_freight": visible_freight,
+                }
+                if can_edit_freight:
+                    changes["freight_method"] = freight_method
+                with session_scope() as db:
+                    shipping_service.update_shipment(
+                        db, user, db.get(Quotation, quotation_id), **changes
+                    )
+            except (ShippingError, QuotationError, PermissionDenied) as exc:
+                st.error(str(exc))
+            else:
+                st.toast("Shipping details saved", icon="✅")
+                st.rerun()
+
+        if shipment["freight_method"] is FreightMethod.ADDED_SEPARATELY:
+            st.caption(
+                "Freight appears as a single charge on the Charges tab, maintained "
+                "automatically from the container rows. Do not add a second freight "
+                "charge by hand."
+            )
+        elif shipment["freight_method"] is FreightMethod.INCLUDED:
+            st.caption(
+                "Freight is recorded but not charged — the quoted prices already "
+                "contain it, so it is deliberately absent from the totals."
+            )
+        else:
+            st.caption(
+                "Freight is internal only: it feeds margin and landed cost, is never "
+                "charged to the customer, and never appears on the document."
+            )
+
+        if st.button("Remove the shipping arrangement"):
+            with session_scope() as db:
+                shipping_service.remove_shipment(
+                    db, user, db.get(Quotation, quotation_id)
+                )
+            st.toast("Shipping removed", icon="✅")
+            st.rerun()
+
+    elif not can_ship and shipment is not None:
+        st.info("You have read-only access to the shipping details.")
 
 
 # --------------------------------------------------------------------------- #

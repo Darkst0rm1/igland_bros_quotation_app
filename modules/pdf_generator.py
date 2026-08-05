@@ -336,6 +336,67 @@ def _line_table(model: QuotationDocument, styles, width: float):  # noqa: ANN001
     return table
 
 
+def _shipping_flowables(model: QuotationDocument, styles, width: float) -> list:  # noqa: ANN001
+    """The optional Shipping & Container Details section."""
+    shipping = model.shipping
+    if shipping is None:
+        return []
+
+    numeric = set(shipping.numeric_indexes)
+    header = [
+        Paragraph(_escape(h), styles["head_right"] if i in numeric else styles["head"])
+        for i, h in enumerate(shipping.headings)
+    ]
+    body = [
+        [
+            Paragraph(
+                _escape(cell),
+                styles["cell_right"] if i in numeric else styles["cell"],
+            )
+            for i, cell in enumerate(row)
+        ]
+        for row in shipping.rows
+    ]
+
+    table = LongTable(
+        [header, *body],
+        colWidths=[width / len(shipping.columns)] * len(shipping.columns),
+        repeatRows=1,
+        splitByRow=True,
+    )
+    table.setStyle(
+        TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), BAND),
+            ("LINEBELOW", (0, 0), (-1, 0), 0.6, RULE),
+            ("LINEBELOW", (0, 1), (-1, -1), 0.25, RULE),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ("LEFTPADDING", (0, 0), (-1, -1), 5),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ])
+    )
+
+    flowables: list = [
+        Paragraph("Shipping &amp; container details", styles["section"]),
+        table,
+        Spacer(1, 6),
+    ]
+
+    if shipping.summary:
+        summary_text = "  ·  ".join(
+            f"<font color='#5f6b7a'>{_escape(label)}:</font> {_escape(value)}"
+            for label, value in shipping.summary
+        )
+        flowables.append(Paragraph(summary_text, styles["term"]))
+    if shipping.freight_statement:
+        flowables.append(Paragraph(_escape(shipping.freight_statement), styles["term"]))
+    if shipping.notes:
+        flowables.append(Spacer(1, 3))
+        flowables.append(Paragraph(_escape(shipping.notes), styles["term"]))
+    return flowables
+
+
 def _totals_table(model: QuotationDocument, styles, width: float):  # noqa: ANN001
     rows = []
     for total in model.totals:
@@ -443,6 +504,8 @@ def render(document: QuotationDocument, page_size: str = "A4") -> bytes:
     story.append(_line_table(document, styles, width))
     story.append(Spacer(1, 8))
     story.append(_totals_table(document, styles, width))
+
+    story += _shipping_flowables(document, styles, width)
 
     if document.customer_notes:
         story.append(Paragraph("Notes", styles["section"]))

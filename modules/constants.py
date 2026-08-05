@@ -84,6 +84,12 @@ class Perm(StrEnum):
     PRICE_MANAGE_TIERS = "price.manage_tiers"
     PLATE_RATE_MANAGE = "plate_rate.manage"
 
+    # Container shipping
+    SHIPMENT_EDIT = "shipment.edit"
+    SHIPMENT_VIEW_FREIGHT = "shipment.view_freight"
+    SHIPMENT_EDIT_FREIGHT = "shipment.edit_freight"
+    SHIPPING_LINE_MANAGE = "shipping_line.manage"
+
     # Finance configuration
     TAX_MANAGE = "tax.manage"
     FX_MANAGE = "fx.manage"
@@ -124,6 +130,10 @@ PERMISSION_CATEGORIES: dict[Perm, str] = {
         Perm.PRODUCT_VIEW, Perm.PRODUCT_CREATE, Perm.PRODUCT_EDIT, Perm.PRICE_VIEW,
         Perm.PRICE_MANAGE, Perm.PRICE_IMPORT, Perm.PRICE_MANAGE_TIERS, Perm.PLATE_RATE_MANAGE,
     )},
+    **{p: "Container shipping" for p in (
+        Perm.SHIPMENT_EDIT, Perm.SHIPMENT_VIEW_FREIGHT,
+        Perm.SHIPMENT_EDIT_FREIGHT, Perm.SHIPPING_LINE_MANAGE,
+    )},
     **{p: "Finance configuration" for p in (
         Perm.TAX_MANAGE, Perm.FX_MANAGE, Perm.APPROVAL_LIMITS_MANAGE,
     )},
@@ -147,6 +157,7 @@ ROLE_PERMISSIONS: dict[RoleCode, frozenset[Perm]] = {
         Perm.QUOTE_UPDATE_STATUS, Perm.QUOTE_CREATE_REVISION, Perm.QUOTE_EXPORT,
         Perm.CUSTOMER_VIEW, Perm.CUSTOMER_CREATE, Perm.CUSTOMER_EDIT,
         Perm.PRODUCT_VIEW, Perm.PRICE_VIEW,
+        Perm.SHIPMENT_EDIT,
         Perm.REPORT_VIEW, Perm.AUDIT_VIEW_OWN,
     }),
     RoleCode.SALES_MANAGER: frozenset({
@@ -160,6 +171,7 @@ ROLE_PERMISSIONS: dict[RoleCode, frozenset[Perm]] = {
         Perm.COST_VIEW, Perm.MARGIN_VIEW,
         Perm.CUSTOMER_VIEW, Perm.CUSTOMER_CREATE, Perm.CUSTOMER_EDIT, Perm.CUSTOMER_DELETE,
         Perm.PRODUCT_VIEW, Perm.PRICE_VIEW,
+        Perm.SHIPMENT_EDIT, Perm.SHIPMENT_VIEW_FREIGHT, Perm.SHIPMENT_EDIT_FREIGHT,
         Perm.TERMS_MANAGE_TEMPLATES,
         Perm.REPORT_VIEW, Perm.REPORT_VIEW_ALL,
         Perm.AUDIT_VIEW_OWN, Perm.AUDIT_VIEW_ALL,
@@ -170,6 +182,7 @@ ROLE_PERMISSIONS: dict[RoleCode, frozenset[Perm]] = {
         Perm.COST_VIEW, Perm.COST_MANAGE, Perm.MARGIN_VIEW,
         Perm.CUSTOMER_VIEW, Perm.CUSTOMER_CREATE, Perm.CUSTOMER_EDIT,
         Perm.PRODUCT_VIEW, Perm.PRICE_VIEW,
+        Perm.SHIPMENT_VIEW_FREIGHT, Perm.SHIPMENT_EDIT_FREIGHT,
         Perm.PLATE_RATE_MANAGE, Perm.TAX_MANAGE, Perm.FX_MANAGE,
         Perm.APPROVAL_LIMITS_MANAGE, Perm.TERMS_MANAGE_TEMPLATES,
         Perm.REPORT_VIEW, Perm.REPORT_VIEW_ALL,
@@ -337,12 +350,128 @@ class PriceWarningCode(StrEnum):
     BELOW_MOQ = "BELOW_MOQ"
     DUPLICATE_LINE = "DUPLICATE_LINE"
     MIX_LIMIT = "MIX_LIMIT"
+    DUPLICATE_FREIGHT = "DUPLICATE_FREIGHT"
+    CONTAINER_CAPACITY_UNKNOWN = "CONTAINER_CAPACITY_UNKNOWN"
 
 
 class WarningSeverity(StrEnum):
     INFO = "INFO"
     WARNING = "WARNING"
     BLOCKING = "BLOCKING"
+
+
+# --------------------------------------------------------------------------- #
+# Container shipping
+# --------------------------------------------------------------------------- #
+
+class ContainerSize(StrEnum):
+    TWENTY_FT = "20FT"
+    FORTY_FT = "40FT"
+    FORTY_FT_HC = "40FT_HC"
+    FORTY_FIVE_FT_HC = "45FT_HC"
+    CUSTOM = "CUSTOM"
+
+
+CONTAINER_SIZE_LABELS: dict[ContainerSize, str] = {
+    ContainerSize.TWENTY_FT: "20 ft",
+    ContainerSize.FORTY_FT: "40 ft",
+    ContainerSize.FORTY_FT_HC: "40 ft High Cube",
+    ContainerSize.FORTY_FIVE_FT_HC: "45 ft High Cube",
+    ContainerSize.CUSTOM: "Custom",
+}
+
+
+class ContainerType(StrEnum):
+    DRY = "DRY"
+    HIGH_CUBE = "HIGH_CUBE"
+    REFRIGERATED = "REFRIGERATED"
+    OPEN_TOP = "OPEN_TOP"
+    FLAT_RACK = "FLAT_RACK"
+    CUSTOM = "CUSTOM"
+
+
+CONTAINER_TYPE_LABELS: dict[ContainerType, str] = {
+    ContainerType.DRY: "Dry",
+    ContainerType.HIGH_CUBE: "High Cube",
+    ContainerType.REFRIGERATED: "Refrigerated",
+    ContainerType.OPEN_TOP: "Open Top",
+    ContainerType.FLAT_RACK: "Flat Rack",
+    ContainerType.CUSTOM: "Custom",
+}
+
+#: The reference price list ships in 40' high-cube dry containers, floor loaded,
+#: so those are the defaults. Both remain editable per container row.
+DEFAULT_CONTAINER_SIZE = ContainerSize.FORTY_FT_HC
+DEFAULT_CONTAINER_TYPE = ContainerType.DRY
+
+
+class FreightMethod(StrEnum):
+    """How container freight relates to the price the customer is quoted.
+
+    Only ``ADDED_SEPARATELY`` produces a quotation charge. The other two are
+    recorded against the shipment and never become charges, because
+    ``calculation_engine.compute_totals`` adds **every** charge to the grand
+    total regardless of customer visibility — an "internal only" charge is
+    still money the customer pays, just not itemised. Making included or
+    internal freight a charge would silently inflate the quotation.
+    """
+
+    INCLUDED = "INCLUDED"
+    ADDED_SEPARATELY = "ADDED_SEPARATELY"
+    INTERNAL_ONLY = "INTERNAL_ONLY"
+
+
+FREIGHT_METHOD_LABELS: dict[FreightMethod, str] = {
+    FreightMethod.INCLUDED: "Freight included in the price",
+    FreightMethod.ADDED_SEPARATELY: "Freight added as a separate charge",
+    FreightMethod.INTERNAL_ONLY: "Freight internal only (margin and landed cost)",
+}
+
+#: Marks the single quotation charge derived from a shipment. Reconciled to at
+#: most one row so freight can never be counted twice.
+CHARGE_SOURCE_SHIPMENT = "shipment"
+
+
+class Incoterm(StrEnum):
+    EXW = "EXW"
+    FCA = "FCA"
+    FAS = "FAS"
+    FOB = "FOB"
+    CFR = "CFR"
+    CIF = "CIF"
+    CPT = "CPT"
+    CIP = "CIP"
+    DAP = "DAP"
+    DPU = "DPU"
+    DDP = "DDP"
+
+
+#: From the reference price list: "FOB Çerkezköy (Türkiye) (INCOTERMS 2020)".
+DEFAULT_INCOTERM = Incoterm.FOB
+
+
+class LoadingMethod(StrEnum):
+    FLOOR_LOADED = "FLOOR_LOADED"
+    PALLETISED = "PALLETISED"
+    SLIP_SHEET = "SLIP_SHEET"
+    OTHER = "OTHER"
+
+
+LOADING_METHOD_LABELS: dict[LoadingMethod, str] = {
+    LoadingMethod.FLOOR_LOADED: "Floor loaded",
+    LoadingMethod.PALLETISED: "Palletised",
+    LoadingMethod.SLIP_SHEET: "Slip sheet",
+    LoadingMethod.OTHER: "Other",
+}
+
+DEFAULT_LOADING_METHOD = LoadingMethod.FLOOR_LOADED
+
+#: Seeded carriers. Maintained as data from Company Settings, so this list is a
+#: starting point rather than a fixed set.
+DEFAULT_SHIPPING_LINES: tuple[str, ...] = (
+    "Maersk", "MSC", "CMA CGM", "Hapag-Lloyd", "COSCO",
+    "ONE", "Evergreen", "Yang Ming", "ZIM",
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -518,6 +647,11 @@ class AuditAction(StrEnum):
     PRODUCT_EDITED = "PRODUCT_EDITED"
     COST_CHANGED = "COST_CHANGED"
     PRICE_LIST_IMPORTED = "PRICE_LIST_IMPORTED"
+    CONTAINER_CAPACITY_IMPORTED = "CONTAINER_CAPACITY_IMPORTED"
+    SHIPMENT_EDITED = "SHIPMENT_EDITED"
+    CONTAINER_ADDED = "CONTAINER_ADDED"
+    CONTAINER_REMOVED = "CONTAINER_REMOVED"
+    FREIGHT_CHANGED = "FREIGHT_CHANGED"
     IMPORT_FAILED = "IMPORT_FAILED"
 
     SETTINGS_CHANGED = "SETTINGS_CHANGED"
@@ -552,6 +686,10 @@ class EntityType(StrEnum):
     COMPANY_SETTINGS = "COMPANY_SETTINGS"
     APP_SETTING = "APP_SETTING"
     TERM_TEMPLATE = "TERM_TEMPLATE"
+    SHIPPING_LINE = "SHIPPING_LINE"
+    QUOTATION_SHIPMENT = "QUOTATION_SHIPMENT"
+    SHIPMENT_CONTAINER = "SHIPMENT_CONTAINER"
+    PRODUCT_CONTAINER_CAPACITY = "PRODUCT_CONTAINER_CAPACITY"
     SESSION = "SESSION"
 
 

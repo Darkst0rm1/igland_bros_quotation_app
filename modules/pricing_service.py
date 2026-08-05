@@ -237,6 +237,7 @@ def evaluate_quotation(
     warnings.extend(_tier_container_warnings(session, quotation, items))
     warnings.extend(_duplicate_line_warnings(items))
     warnings.extend(_mix_limit_warnings(session, items))
+    warnings.extend(_duplicate_freight_warnings(session, quotation))
 
     order = {
         WarningSeverity.BLOCKING: 0,
@@ -264,6 +265,8 @@ def _tier_container_warnings(
     scope = settings_service.tier_container_scope(session)
     warnings: list[PriceWarning] = []
 
+    # Per-line scope keeps using the line's own count: a shipment describes
+    # the order as a whole, so there is nothing per-line to read from it.
     if scope == "line":
         for item in items:
             tier = _tier_for(tiers, item)
@@ -283,9 +286,7 @@ def _tier_container_warnings(
                 )
         return warnings
 
-    total_containers = sum(
-        (to_decimal(item.container_count) for item in items), ZERO
-    )
+    total_containers = _quotation_container_total(session, quotation, items)
     required = {
         tier.name: tier.min_containers
         for item in items
@@ -303,6 +304,59 @@ def _tier_container_warnings(
                 )
             )
     return warnings
+
+
+def _quotation_container_total(
+    session: Session, quotation: Quotation, items: list[QuotationItem]
+) -> Decimal:
+    """Containers on this quotation, for the tier minimums.
+
+    The **shipment is authoritative when one exists** — it is the real shipping
+    plan, with a row per container configuration. Quotations raised before
+    container shipping existed have no shipment, and fall back to the per-line
+    ``container_count`` they were built with, so their warnings are unchanged.
+    """
+    from modules.shipping_service import total_containers
+
+    from_shipment = total_containers(session, quotation.id)
+    if from_shipment > ZERO:
+        return from_shipment
+    return sum((to_decimal(item.container_count) for item in items), ZERO)
+
+
+def _duplicate_freight_warnings(
+    session: Session, quotation: Quotation
+) -> list[PriceWarning]:
+    """Freight entered by hand while a shipment also carries freight.
+
+    Not merged and not silently ignored: two freight figures on one quotation
+    is a decision for whoever raised it. The derived shipment charge is
+    reconciled to a single row, so this can only happen when someone adds a
+    second one deliberately.
+    """
+    from modules.constants import FreightMethod
+    from modules.shipping_service import get_shipment, manual_freight_charges
+
+    shipment = get_shipment(session, quotation.id)
+    if shipment is None or shipment.total_freight <= ZERO:
+        return []
+
+    manual = manual_freight_charges(session, quotation.id)
+    if not manual:
+        return []
+
+    manual_total = sum((c.amount for c in manual), ZERO)
+    charged = shipment.freight_method is FreightMethod.ADDED_SEPARATELY
+    return [
+        PriceWarning(
+            PriceWarningCode.DUPLICATE_FREIGHT,
+            WarningSeverity.WARNING,
+            f"This quotation has {shipment.total_freight:,.2f} of container freight "
+            f"{'charged to the customer' if charged else 'recorded on the shipment'}, "
+            f"and a further {manual_total:,.2f} entered as a manual freight charge. "
+            "Remove one, or confirm they are genuinely separate costs.",
+        )
+    ]
 
 
 def _tier_for(tiers: dict, item: QuotationItem):  # noqa: ANN001, ANN201
