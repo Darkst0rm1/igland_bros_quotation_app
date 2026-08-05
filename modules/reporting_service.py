@@ -24,6 +24,7 @@ from sqlalchemy import Select, and_, case, func, select
 from sqlalchemy.orm import Session
 
 from modules.authorization import AuthUser, quotation_scope_filter
+from modules.repositories import LIKE_ESCAPE, _like
 from modules.constants import QuotationStatus
 from modules.models import (
     Approval,
@@ -35,6 +36,9 @@ from modules.models import (
     ProductVariant,
     Quotation,
     QuotationItem,
+    QuotationShipment,
+    ShipmentContainer,
+    ShippingLine,
     User,
 )
 
@@ -65,6 +69,16 @@ class ReportFilters:
     product_variant_ids: tuple[int, ...] = ()
     current_revision_only: bool = True
 
+    # --- container shipping ------------------------------------------- #
+    shipping_line_ids: tuple[int, ...] = ()
+    container_sizes: tuple[str, ...] = ()
+    container_types: tuple[str, ...] = ()
+    freight_methods: tuple[str, ...] = ()
+    port_of_loading: str | None = None
+    port_of_discharge: str | None = None
+    min_containers: Decimal | None = None
+    max_transit_days: int | None = None
+
     def describe(self) -> str:
         parts: list[str] = []
         if self.date_from or self.date_to:
@@ -79,6 +93,20 @@ class ReportFilters:
             parts.append(f"{len(self.statuses)} status(es)")
         if self.currency:
             parts.append(self.currency)
+        if self.shipping_line_ids:
+            parts.append(f"{len(self.shipping_line_ids)} carrier(s)")
+        if self.container_sizes:
+            parts.append(f"{len(self.container_sizes)} container size(s)")
+        if self.freight_methods:
+            parts.append(f"{len(self.freight_methods)} freight method(s)")
+        if self.port_of_loading:
+            parts.append(f"from {self.port_of_loading}")
+        if self.port_of_discharge:
+            parts.append(f"to {self.port_of_discharge}")
+        if self.min_containers:
+            parts.append(f"{self.min_containers:g}+ containers")
+        if self.max_transit_days:
+            parts.append(f"transit under {self.max_transit_days} days")
         return " · ".join(parts) or "no filters"
 
 
@@ -120,6 +148,7 @@ def base_query(user: AuthUser, filters: ReportFilters | None = None) -> Select:
         stmt = stmt.where(Quotation.status.in_(filters.statuses))
     if filters.currency:
         stmt = stmt.where(Quotation.currency == filters.currency)
+    stmt = _apply_shipping_filters(stmt, filters)
     if filters.tier_codes or filters.product_variant_ids:
         line = select(QuotationItem.quotation_id)
         if filters.product_variant_ids:
@@ -131,6 +160,84 @@ def base_query(user: AuthUser, filters: ReportFilters | None = None) -> Select:
                 PriceTier, QuotationItem.price_tier_id == PriceTier.id
             ).where(PriceTier.code.in_(filters.tier_codes))
         stmt = stmt.where(Quotation.id.in_(line))
+    return stmt
+
+
+def _apply_shipping_filters(stmt: Select, filters: ReportFilters) -> Select:
+    """Restrict to quotations whose shipment matches the shipping criteria.
+
+    Applied as an ``IN`` over quotation ids rather than a join, so a quotation
+    with several container rows is not multiplied across the result and its
+    value counted more than once.
+    """
+    container_conditions = []
+    if filters.shipping_line_ids:
+        container_conditions.append(
+            ShipmentContainer.shipping_line_id.in_(filters.shipping_line_ids)
+        )
+    if filters.container_sizes:
+        container_conditions.append(
+            ShipmentContainer.container_size.in_(filters.container_sizes)
+        )
+    if filters.container_types:
+        container_conditions.append(
+            ShipmentContainer.container_type.in_(filters.container_types)
+        )
+    if filters.max_transit_days:
+        container_conditions.append(
+            ShipmentContainer.transit_days <= filters.max_transit_days
+        )
+
+    shipment_conditions = []
+    if filters.freight_methods:
+        shipment_conditions.append(
+            QuotationShipment.freight_method.in_(filters.freight_methods)
+        )
+    if filters.port_of_loading:
+        shipment_conditions.append(
+            QuotationShipment.port_of_loading.ilike(
+                _like(filters.port_of_loading), escape=LIKE_ESCAPE
+            )
+        )
+    if filters.port_of_discharge:
+        shipment_conditions.append(
+            QuotationShipment.port_of_discharge.ilike(
+                _like(filters.port_of_discharge), escape=LIKE_ESCAPE
+            )
+        )
+
+    if container_conditions:
+        stmt = stmt.where(
+            Quotation.id.in_(
+                select(QuotationShipment.quotation_id)
+                .join(
+                    ShipmentContainer,
+                    ShipmentContainer.quotation_shipment_id == QuotationShipment.id,
+                )
+                .where(*container_conditions)
+            )
+        )
+    if shipment_conditions:
+        stmt = stmt.where(
+            Quotation.id.in_(
+                select(QuotationShipment.quotation_id).where(*shipment_conditions)
+            )
+        )
+    if filters.min_containers is not None:
+        stmt = stmt.where(
+            Quotation.id.in_(
+                select(QuotationShipment.quotation_id)
+                .join(
+                    ShipmentContainer,
+                    ShipmentContainer.quotation_shipment_id == QuotationShipment.id,
+                )
+                .group_by(QuotationShipment.quotation_id)
+                .having(
+                    func.sum(ShipmentContainer.container_count)
+                    >= filters.min_containers
+                )
+            )
+        )
     return stmt
 
 
@@ -719,6 +826,336 @@ def conversion_by_month(
         ],
         ["Month", "Accepted", "Lost", "Conversion %"],
     )
+
+
+# --------------------------------------------------------------------------- #
+# Container shipping
+# --------------------------------------------------------------------------- #
+
+@dataclass(frozen=True)
+class ShippingHeadlines:
+    total_containers: Decimal = ZERO
+    quotations_with_shipping: int = 0
+    total_freight: Decimal = ZERO
+    average_transit_days: Decimal | None = None
+    currencies: tuple[str, ...] = ()
+
+    @property
+    def average_freight_per_container(self) -> Decimal | None:
+        """``None`` rather than zero when nothing has been shipped yet."""
+        if self.total_containers <= ZERO:
+            return None
+        return (self.total_freight / self.total_containers).quantize(Decimal("0.01"))
+
+
+def shipping_headlines(
+    session: Session, user: AuthUser, filters: ReportFilters | None = None
+) -> ShippingHeadlines:
+    ids = _scoped_ids(session, user, filters or ReportFilters()).subquery()
+
+    rows = session.execute(
+        select(
+            ShipmentContainer.container_count,
+            ShipmentContainer.freight_cost,
+            ShipmentContainer.transit_days,
+            QuotationShipment.freight_currency,
+            QuotationShipment.quotation_id,
+        )
+        .join(
+            QuotationShipment,
+            ShipmentContainer.quotation_shipment_id == QuotationShipment.id,
+        )
+        .where(QuotationShipment.quotation_id.in_(select(ids.c.id)))
+    ).all()
+
+    total_containers = ZERO
+    total_freight = ZERO
+    transit_values: list[int] = []
+    currencies: set[str] = set()
+    quotations: set[int] = set()
+
+    for count, freight, transit, currency, quotation_id in rows:
+        count = count or ZERO
+        total_containers += count
+        # Quantized as it accumulates: freight is 6 dp and counts are 3 dp,
+        # so the raw product carries nine and reads oddly in an export.
+        total_freight += ((freight or ZERO) * count).quantize(Decimal('0.01'))
+        if transit:
+            transit_values.append(int(transit))
+        if currency:
+            currencies.add(currency)
+        quotations.add(quotation_id)
+
+    average_transit = (
+        (Decimal(sum(transit_values)) / Decimal(len(transit_values))).quantize(
+            Decimal("0.1")
+        )
+        if transit_values else None
+    )
+
+    return ShippingHeadlines(
+        total_containers=total_containers,
+        quotations_with_shipping=len(quotations),
+        total_freight=total_freight,
+        average_transit_days=average_transit,
+        currencies=tuple(sorted(currencies)),
+    )
+
+
+def _container_grouped(
+    session: Session,
+    user: AuthUser,
+    filters: ReportFilters | None,
+    label_column,  # noqa: ANN001
+    label_name: str,
+    join=None,  # noqa: ANN001
+) -> pd.DataFrame:
+    ids = _scoped_ids(session, user, filters or ReportFilters()).subquery()
+    stmt = (
+        select(
+            label_column,
+            func.sum(ShipmentContainer.container_count),
+            func.count(ShipmentContainer.id),
+            func.sum(
+                ShipmentContainer.container_count * ShipmentContainer.freight_cost
+            ),
+        )
+        .join(
+            QuotationShipment,
+            ShipmentContainer.quotation_shipment_id == QuotationShipment.id,
+        )
+        .where(QuotationShipment.quotation_id.in_(select(ids.c.id)))
+        .group_by(label_column)
+        .order_by(func.sum(ShipmentContainer.container_count).desc())
+    )
+    if join is not None:
+        stmt = stmt.join(join[0], join[1], isouter=True)
+
+    rows = session.execute(stmt).all()
+    return _frame(
+        [
+            {
+                label_name: _readable(label),
+                "Containers": float(containers or 0),
+                "Rows": rows_count,
+                "Freight": float(freight or 0),
+            }
+            for label, containers, rows_count, freight in rows
+        ],
+        [label_name, "Containers", "Rows", "Freight"],
+    )
+
+
+def _readable(value) -> str:  # noqa: ANN001
+    """Turn an enum value into the label an operator would recognise."""
+    from modules.constants import (
+        CONTAINER_SIZE_LABELS,
+        CONTAINER_TYPE_LABELS,
+        FREIGHT_METHOD_LABELS,
+        ContainerSize,
+        ContainerType,
+        FreightMethod,
+    )
+
+    if value is None:
+        return "—"
+    for enum_type, labels in (
+        (ContainerSize, CONTAINER_SIZE_LABELS),
+        (ContainerType, CONTAINER_TYPE_LABELS),
+        (FreightMethod, FREIGHT_METHOD_LABELS),
+    ):
+        if isinstance(value, enum_type):
+            return labels[value]
+        try:
+            return labels[enum_type(value)]
+        except (ValueError, KeyError):
+            continue
+    return str(value)
+
+
+def containers_by_size(
+    session: Session, user: AuthUser, filters: ReportFilters | None = None
+) -> pd.DataFrame:
+    return _container_grouped(
+        session, user, filters, ShipmentContainer.container_size, "Container size"
+    )
+
+
+def containers_by_type(
+    session: Session, user: AuthUser, filters: ReportFilters | None = None
+) -> pd.DataFrame:
+    return _container_grouped(
+        session, user, filters, ShipmentContainer.container_type, "Container type"
+    )
+
+
+def containers_by_shipping_line(
+    session: Session, user: AuthUser, filters: ReportFilters | None = None
+) -> pd.DataFrame:
+    """Carrier usage. Rows booked outside the managed list show as their free text."""
+    ids = _scoped_ids(session, user, filters or ReportFilters()).subquery()
+    rows = session.execute(
+        select(
+            ShippingLine.name,
+            ShipmentContainer.custom_shipping_line,
+            func.sum(ShipmentContainer.container_count),
+            func.sum(
+                ShipmentContainer.container_count * ShipmentContainer.freight_cost
+            ),
+        )
+        .join(
+            QuotationShipment,
+            ShipmentContainer.quotation_shipment_id == QuotationShipment.id,
+        )
+        .join(ShippingLine, ShipmentContainer.shipping_line_id == ShippingLine.id,
+              isouter=True)
+        .where(QuotationShipment.quotation_id.in_(select(ids.c.id)))
+        .group_by(ShippingLine.name, ShipmentContainer.custom_shipping_line)
+        .order_by(func.sum(ShipmentContainer.container_count).desc())
+    ).all()
+
+    merged: dict[str, dict[str, float]] = {}
+    for name, custom, containers, freight in rows:
+        label = name or custom or "Not stated"
+        entry = merged.setdefault(label, {"Containers": 0.0, "Freight": 0.0})
+        entry["Containers"] += float(containers or 0)
+        entry["Freight"] += float(freight or 0)
+
+    return _frame(
+        [
+            {"Shipping line": label, **values}
+            for label, values in sorted(
+                merged.items(), key=lambda kv: kv[1]["Containers"], reverse=True
+            )
+        ],
+        ["Shipping line", "Containers", "Freight"],
+    )
+
+
+def containers_by_route(
+    session: Session, user: AuthUser, filters: ReportFilters | None = None
+) -> pd.DataFrame:
+    ids = _scoped_ids(session, user, filters or ReportFilters()).subquery()
+    rows = session.execute(
+        select(
+            QuotationShipment.port_of_loading,
+            QuotationShipment.port_of_discharge,
+            func.sum(ShipmentContainer.container_count),
+            func.avg(ShipmentContainer.transit_days),
+        )
+        .join(
+            ShipmentContainer,
+            ShipmentContainer.quotation_shipment_id == QuotationShipment.id,
+        )
+        .where(QuotationShipment.quotation_id.in_(select(ids.c.id)))
+        .group_by(
+            QuotationShipment.port_of_loading, QuotationShipment.port_of_discharge
+        )
+        .order_by(func.sum(ShipmentContainer.container_count).desc())
+    ).all()
+    return _frame(
+        [
+            {
+                "Port of loading": loading or "—",
+                "Port of discharge": discharge or "—",
+                "Containers": float(containers or 0),
+                "Average transit (days)": round(float(transit), 1) if transit else None,
+            }
+            for loading, discharge, containers, transit in rows
+        ],
+        ["Port of loading", "Port of discharge", "Containers", "Average transit (days)"],
+    )
+
+
+def shipments(
+    session: Session, user: AuthUser, filters: ReportFilters | None = None
+) -> pd.DataFrame:
+    """One row per container, for the detailed shipping report."""
+    ids = _scoped_ids(session, user, filters or ReportFilters()).subquery()
+    rows = session.execute(
+        select(
+            Quotation.quote_number,
+            Quotation.revision_no,
+            Quotation.customer_name_snapshot,
+            QuotationShipment.freight_method,
+            QuotationShipment.port_of_loading,
+            QuotationShipment.port_of_discharge,
+            QuotationShipment.freight_currency,
+            ShippingLine.name,
+            ShipmentContainer.custom_shipping_line,
+            ShipmentContainer.container_size,
+            ShipmentContainer.container_type,
+            ShipmentContainer.container_count,
+            ShipmentContainer.freight_cost,
+            ShipmentContainer.transit_days,
+            ShipmentContainer.estimated_departure,
+            ShipmentContainer.estimated_arrival,
+        )
+        .join(QuotationShipment, QuotationShipment.quotation_id == Quotation.id)
+        .join(
+            ShipmentContainer,
+            ShipmentContainer.quotation_shipment_id == QuotationShipment.id,
+        )
+        .join(ShippingLine, ShipmentContainer.shipping_line_id == ShippingLine.id,
+              isouter=True)
+        .where(Quotation.id.in_(select(ids.c.id)))
+        .order_by(Quotation.quote_date.desc(), ShipmentContainer.sort_order)
+    ).all()
+
+    return _frame(
+        [
+            {
+                "Quotation": f"{number} Rev {revision}",
+                "Customer": customer or "—",
+                "Shipping line": line or custom or "Not stated",
+                "Container size": _readable(size),
+                "Container type": _readable(ctype),
+                "Containers": float(count or 0),
+                "Port of loading": loading or "—",
+                "Port of discharge": discharge or "—",
+                "Transit (days)": transit,
+                "Departs": departure.isoformat() if departure else "—",
+                "Arrives": arrival.isoformat() if arrival else "—",
+                "Freight method": _readable(method),
+                "Freight / container": float(freight or 0),
+                "Currency": currency,
+            }
+            for (
+                number, revision, customer, method, loading, discharge, currency,
+                line, custom, size, ctype, count, freight, transit,
+                departure, arrival,
+            ) in rows
+        ],
+        [
+            "Quotation", "Customer", "Shipping line", "Container size",
+            "Container type", "Containers", "Port of loading", "Port of discharge",
+            "Transit (days)", "Departs", "Arrives", "Freight method",
+            "Freight / container", "Currency",
+        ],
+    )
+
+
+def shipping_filter_options(session: Session) -> dict[str, list]:
+    """Carriers and ports to populate the shipping filter widgets."""
+    from modules.constants import (
+        CONTAINER_SIZE_LABELS,
+        CONTAINER_TYPE_LABELS,
+        FREIGHT_METHOD_LABELS,
+    )
+
+    carriers = session.execute(
+        select(ShippingLine.id, ShippingLine.name)
+        .where(ShippingLine.deleted_at.is_(None))
+        .order_by(ShippingLine.sort_order, ShippingLine.name)
+    ).all()
+    return {
+        "carriers": [(cid, name) for cid, name in carriers],
+        "sizes": [(s.value, label) for s, label in CONTAINER_SIZE_LABELS.items()],
+        "types": [(c.value, label) for c, label in CONTAINER_TYPE_LABELS.items()],
+        "freight_methods": [
+            (m.value, label) for m, label in FREIGHT_METHOD_LABELS.items()
+        ],
+    }
 
 
 # --------------------------------------------------------------------------- #

@@ -808,6 +808,171 @@ class TestRevisions:
         assert not revision_service.has_changes(diff)
 
 
+class TestShippingReports:
+    @pytest.fixture
+    def shipped(self, session, admin, quotation, carrier):
+        _add(session, admin, quotation, carrier, ContainerSize.FORTY_FT_HC,
+             count="2", freight="3200")
+        _add(session, admin, quotation, carrier, ContainerSize.TWENTY_FT,
+             count="1", freight="1900")
+        shipping_service.update_shipment(
+            session, admin, quotation,
+            port_of_loading="Çerkezköy", port_of_discharge="Toronto",
+        )
+        session.commit()
+        return quotation
+
+    def test_headlines(self, session, admin, shipped):
+        from modules import reporting_service
+
+        figures = reporting_service.shipping_headlines(session, admin)
+        assert figures.total_containers == D("3")
+        assert figures.total_freight == D("8300.00")
+        assert figures.average_freight_per_container == D("2766.67")
+        assert figures.quotations_with_shipping == 1
+
+    def test_averages_are_none_rather_than_zero_when_unknown(self, session, admin):
+        """Nothing shipped is not the same as an average of zero."""
+        from modules import reporting_service
+
+        figures = reporting_service.shipping_headlines(session, admin)
+        assert figures.total_containers == D("0")
+        assert figures.average_freight_per_container is None
+        assert figures.average_transit_days is None
+
+    def test_containers_by_size_uses_readable_labels(self, session, admin, shipped):
+        from modules import reporting_service
+
+        frame = reporting_service.containers_by_size(session, admin)
+        sizes = set(frame["Container size"])
+        assert sizes == {"40 ft High Cube", "20 ft"}
+
+    def test_containers_by_shipping_line(self, session, admin, shipped, carrier):
+        from modules import reporting_service
+
+        frame = reporting_service.containers_by_shipping_line(session, admin)
+        assert frame.iloc[0]["Shipping line"] == carrier.name
+        assert frame.iloc[0]["Containers"] == 3.0
+
+    def test_the_shipment_report_has_one_row_per_container(
+        self, session, admin, shipped
+    ):
+        from modules import reporting_service
+
+        frame = reporting_service.shipments(session, admin)
+        assert len(frame) == 2
+        assert set(frame["Port of discharge"]) == {"Toronto"}
+
+    def test_every_shipping_aggregate_survives_an_empty_database(self, session, admin):
+        from modules import reporting_service
+
+        for builder in (
+            reporting_service.containers_by_size,
+            reporting_service.containers_by_type,
+            reporting_service.containers_by_shipping_line,
+            reporting_service.containers_by_route,
+            reporting_service.shipments,
+        ):
+            frame = builder(session, admin)
+            assert frame.empty
+            assert len(frame.columns) >= 3, builder.__name__
+
+    def test_filtering_by_container_size(self, session, admin, shipped):
+        from modules import reporting_service
+        from modules.reporting_service import ReportFilters
+
+        matching = reporting_service.headlines(
+            session, admin, ReportFilters(container_sizes=("20FT",))
+        )
+        assert matching.total == 1
+
+        other = reporting_service.headlines(
+            session, admin, ReportFilters(container_sizes=("45FT_HC",))
+        )
+        assert other.total == 0
+
+    def test_filtering_by_carrier_and_port(self, session, admin, shipped, carrier):
+        from modules import reporting_service
+        from modules.reporting_service import ReportFilters
+
+        assert reporting_service.headlines(
+            session, admin, ReportFilters(shipping_line_ids=(carrier.id,))
+        ).total == 1
+        assert reporting_service.headlines(
+            session, admin, ReportFilters(port_of_discharge="Toronto")
+        ).total == 1
+        assert reporting_service.headlines(
+            session, admin, ReportFilters(port_of_discharge="Rotterdam")
+        ).total == 0
+
+    def test_a_multi_container_quotation_is_not_counted_twice(
+        self, session, admin, shipped, carrier
+    ):
+        """Filtering joins through containers, so the quotation must not multiply."""
+        from modules import reporting_service
+        from modules.reporting_service import ReportFilters
+
+        figures = reporting_service.headlines(
+            session, admin, ReportFilters(shipping_line_ids=(carrier.id,))
+        )
+        assert figures.total == 1
+        assert figures.total_quoted == shipped.grand_total
+
+    def test_minimum_container_filter(self, session, admin, shipped):
+        from modules import reporting_service
+        from modules.reporting_service import ReportFilters
+
+        assert reporting_service.headlines(
+            session, admin, ReportFilters(min_containers=D("3"))
+        ).total == 1
+        assert reporting_service.headlines(
+            session, admin, ReportFilters(min_containers=D("4"))
+        ).total == 0
+
+
+class TestShippingLineAdministration:
+    def test_a_carrier_can_be_added_and_renamed(self, session, admin):
+        line = shipping_service.create_shipping_line(session, admin, "Wan Hai")
+        session.commit()
+        assert line.name == "Wan Hai"
+
+        shipping_service.update_shipping_line(
+            session, admin, line.id, name="Wan Hai Lines",
+            is_active=True, sort_order=50,
+        )
+        session.commit()
+        assert line.name == "Wan Hai Lines"
+
+    def test_a_duplicate_name_is_refused(self, session, admin, carrier):
+        with pytest.raises(ShippingError, match="already on the list"):
+            shipping_service.create_shipping_line(session, admin, carrier.name.lower())
+
+    def test_a_blank_name_is_refused(self, session, admin):
+        with pytest.raises(ShippingError, match="needs a name"):
+            shipping_service.create_shipping_line(session, admin, "   ")
+
+    def test_removal_is_a_soft_delete_that_preserves_history(
+        self, session, admin, quotation, carrier
+    ):
+        """A carrier removed from the list must not blank out past quotations."""
+        container = _add(
+            session, admin, quotation, carrier, ContainerSize.FORTY_FT_HC
+        )
+        session.commit()
+
+        shipping_service.delete_shipping_line(session, admin, carrier.id)
+        session.commit()
+
+        assert carrier.name not in [
+            line.name for line in shipping_service.shipping_lines(session)
+        ]
+        assert container.carrier_name == carrier.name
+
+    def test_sales_cannot_manage_carriers(self, session, sales):
+        with pytest.raises(PermissionDenied):
+            shipping_service.create_shipping_line(session, sales, "Anything")
+
+
 class TestImmutability:
     def test_shipping_cannot_be_edited_once_issued(
         self, session, admin, quotation, carrier

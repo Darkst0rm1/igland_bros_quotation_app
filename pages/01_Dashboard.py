@@ -8,6 +8,7 @@ manager's covers their team's. Nothing is filtered after loading.
 from __future__ import annotations
 
 import datetime as dt
+from decimal import Decimal
 
 import plotly.express as px
 import streamlit as st
@@ -17,7 +18,7 @@ from modules.constants import STATUS_DISPLAY_NAMES, Perm, QuotationStatus
 from modules.database import session_scope
 from modules.reporting_service import ReportFilters
 from modules.session import page_header, require_page
-from modules.utilities import format_money
+from modules.utilities import format_money, format_quantity
 
 user = require_page()
 page_header("Dashboard", "Quotation pipeline and outcomes")
@@ -33,6 +34,7 @@ PALETTE = ["#2f6f9f", "#4f9d69", "#c0873b", "#a8556b", "#6b6f8f", "#7f9c4a"]
 
 with session_scope() as db:
     options = reporting_service.filter_options(db, user)
+    shipping_options = reporting_service.shipping_filter_options(db)
 
 with st.expander("Filters", expanded=False):
     row_a = st.columns(4)
@@ -75,6 +77,37 @@ with st.expander("Filters", expanded=False):
             placeholder="All",
         )
 
+    st.markdown("###### Container shipping")
+    row_c = st.columns(4)
+    with row_c[0]:
+        chosen_carriers = st.multiselect(
+            "Shipping line", [c[0] for c in shipping_options["carriers"]],
+            format_func=lambda cid: dict(shipping_options["carriers"])[cid],
+            placeholder="All",
+        )
+    with row_c[1]:
+        chosen_sizes = st.multiselect(
+            "Container size", [s[0] for s in shipping_options["sizes"]],
+            format_func=lambda code: dict(shipping_options["sizes"])[code],
+            placeholder="All",
+        )
+    with row_c[2]:
+        chosen_freight = st.multiselect(
+            "Freight method", [m[0] for m in shipping_options["freight_methods"]],
+            format_func=lambda code: dict(shipping_options["freight_methods"])[code],
+            placeholder="All",
+        )
+    with row_c[3]:
+        min_containers = st.number_input(
+            "Minimum containers", min_value=0, value=0, step=1,
+            help="Quotations totalling at least this many containers.",
+        )
+    row_d = st.columns(2)
+    with row_d[0]:
+        loading_port = st.text_input("Port of loading contains")
+    with row_d[1]:
+        discharge_port = st.text_input("Port of discharge contains")
+
 filters = ReportFilters(
     date_from=date_from,
     date_to=date_to,
@@ -84,6 +117,12 @@ filters = ReportFilters(
     currency=None if chosen_currency == "All" else chosen_currency,
     tier_codes=tuple(chosen_tiers),
     product_variant_ids=tuple(chosen_variants),
+    shipping_line_ids=tuple(chosen_carriers),
+    container_sizes=tuple(chosen_sizes),
+    freight_methods=tuple(chosen_freight),
+    port_of_loading=loading_port or None,
+    port_of_discharge=discharge_port or None,
+    min_containers=Decimal(str(min_containers)) if min_containers else None,
 )
 
 
@@ -261,6 +300,70 @@ _chart(
         labels={"Packs": "Packs quoted"},
     ),
 )
+
+
+# --------------------------------------------------------------------------- #
+# Container shipping
+# --------------------------------------------------------------------------- #
+
+with session_scope() as db:
+    shipping = reporting_service.shipping_headlines(db, user, filters)
+    by_container_size = reporting_service.containers_by_size(db, user, filters)
+    by_carrier = reporting_service.containers_by_shipping_line(db, user, filters)
+
+if shipping.total_containers:
+    st.divider()
+    st.markdown("#### Container shipping")
+
+    can_see_freight = user.has(Perm.SHIPMENT_VIEW_FREIGHT)
+    freight_currency = (
+        shipping.currencies[0] if shipping.currencies else currency_label
+    )
+
+    ship_a, ship_b, ship_c, ship_d = st.columns(4)
+    ship_a.metric("Containers quoted", format_quantity(shipping.total_containers))
+    ship_b.metric("Quotations with shipping", shipping.quotations_with_shipping)
+    if can_see_freight:
+        average = shipping.average_freight_per_container
+        ship_c.metric(
+            "Average freight / container",
+            format_money(average, freight_currency) if average is not None else "—",
+        )
+    else:
+        ship_c.metric("Average freight / container", "—")
+    ship_d.metric(
+        "Average transit",
+        f"{shipping.average_transit_days:g} days"
+        if shipping.average_transit_days is not None else "—",
+        help=(
+            "Averaged over container rows that state a transit time. Shown as — "
+            "when none do, rather than as zero days."
+        ),
+    )
+
+    if not can_see_freight:
+        st.caption(
+            "Freight figures need the shipment.view_freight permission, so they read "
+            "as — rather than being shown as zero."
+        )
+
+    ship_chart_a, ship_chart_b = st.columns(2)
+    with ship_chart_a:
+        _chart(
+            by_container_size, "Containers by size",
+            lambda f: px.bar(
+                f, x="Container size", y="Containers", color="Container size",
+                color_discrete_sequence=PALETTE,
+            ),
+        )
+    with ship_chart_b:
+        _chart(
+            by_carrier, "Containers by shipping line",
+            lambda f: px.bar(
+                f.sort_values("Containers"), x="Containers", y="Shipping line",
+                orientation="h", color_discrete_sequence=PALETTE,
+            ),
+        )
 
 st.caption(
     "Figures cover the quotations you are entitled to see — your own, your team's, or "
