@@ -36,3 +36,8 @@ htmlcov/
 .idea/
 Thumbs.db
 desktop.ini
+
+# --- Accidental nested clone ----------------------------------------------
+# A clone of this repository was once made inside itself, which git records as
+# a gitlink rather than files. Ignored so it cannot be committed again.
+/igland_bros_quotation_app/
