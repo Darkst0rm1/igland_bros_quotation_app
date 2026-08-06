@@ -246,3 +246,109 @@ class TestCapacityImportDoesNotInventBundles:
         session.commit()
 
         assert product.units_per_bundle == D("100")
+
+
+# --------------------------------------------------------------------------- #
+# When a bundle is the pack
+# --------------------------------------------------------------------------- #
+
+class TestBundleIsThePack:
+    """How this catalogue is actually sold: one bundle is one pack of 50, so
+    the workbook's bundles-per-container is packs-per-container directly."""
+
+    def test_capacity_needs_no_conversion(self, session, product_with_capacity):
+        product, capacity = product_with_capacity
+        product.units_per_bundle = D("50")  # the case pack
+        session.commit()
+
+        assert capacity.packs_per_container == capacity.bundles_per_container
+
+    def test_bundle_price_equals_the_pack_price(self):
+        """Which is why the editor stops printing it as a second line: two
+        identical figures invite a hunt for the difference between them."""
+        piece, case_pack = D("0.1826"), D("50")
+        assert pricing_service.bundle_price(piece, case_pack) == D("9.13")
+
+
+class TestEstimatedContainerTotal:
+    """Capacity fills the gap only where nothing better exists."""
+
+    @pytest.fixture
+    def quote(self, session, seeded, make_auth_user, product_with_capacity):
+        from modules import quotation_service
+        from modules.customer_service import create_customer
+        from modules.models import PriceTier, ProductPrice
+        from modules.validation import CustomerInput
+
+        product, capacity = product_with_capacity
+        product.units_per_bundle = D("50")
+        variant = product.variants[0]
+        tier = session.query(PriceTier).filter_by(code="STANDARD").one()
+        session.add(
+            ProductPrice(
+                product_variant_id=variant.id, price_tier_id=tier.id,
+                price_per_pack=D("9.13"), price_per_piece=D("0.1826"),
+                effective_from=__import__("datetime").date(2026, 1, 1),
+            )
+        )
+        user = make_auth_user("SALES_MANAGER", username="mgr")
+        customer = create_customer(
+            session, user,
+            CustomerInput(customer_number="CUST-7001", company_name="Bunzl"),
+        )
+        session.commit()
+        quotation = quotation_service.create_draft(session, user, customer.id)
+        session.commit()
+        return quotation, user, variant, capacity
+
+    def test_estimated_from_capacity_when_nothing_is_stated(self, session, quote):
+        from modules import quotation_service
+        from modules.pricing_service import _quotation_container_total
+
+        quotation, user, variant, _ = quote
+        quotation_service.add_line(
+            session, user, quotation,
+            product_variant_id=variant.id, price_tier_code="STANDARD",
+            quantity_packs=D("2620"),          # 2 x 1,310 packs per container
+        )
+        session.commit()
+
+        total = _quotation_container_total(session, quotation, list(quotation.items))
+        assert total == D("2")
+
+    def test_a_typed_container_count_outranks_the_estimate(self, session, quote):
+        """The workbook has at least one figure that cannot be right, so
+        anything a person actually stated wins."""
+        from modules import quotation_service
+        from modules.pricing_service import _quotation_container_total
+
+        quotation, user, variant, _ = quote
+        quotation_service.add_line(
+            session, user, quotation,
+            product_variant_id=variant.id, price_tier_code="STANDARD",
+            quantity_packs=D("2620"), container_count=D("5"),
+        )
+        session.commit()
+
+        total = _quotation_container_total(session, quotation, list(quotation.items))
+        assert total == D("5")
+
+    def test_a_line_without_capacity_contributes_nothing(self, session, quote):
+        """Rather than being assumed to fill a container."""
+        from modules import quotation_service
+        from modules.models import ProductContainerCapacity
+        from modules.pricing_service import _quotation_container_total
+
+        quotation, user, variant, capacity = quote
+        session.query(ProductContainerCapacity).filter_by(id=capacity.id).delete()
+        session.commit()
+
+        quotation_service.add_line(
+            session, user, quotation,
+            product_variant_id=variant.id, price_tier_code="STANDARD",
+            quantity_packs=D("2620"),
+        )
+        session.commit()
+
+        total = _quotation_container_total(session, quotation, list(quotation.items))
+        assert total == D("0")

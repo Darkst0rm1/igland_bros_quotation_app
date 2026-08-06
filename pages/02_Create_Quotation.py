@@ -597,7 +597,17 @@ with lines_tab:
                         )
                     )
                 )
-                if bundle_size:
+                # Where a bundle is the pack — which is how this catalogue is
+                # sold — the pack price above already *is* the bundle price.
+                # Printing it again under a second heading would put two
+                # identical figures on screen and invite the reader to hunt
+                # for the difference between them.
+                if bundle_size and bundle_size == variant["case_pack"]:
+                    st.caption(
+                        f"One bundle is one pack of {format_quantity(bundle_size)}, "
+                        f"so the prices above are per bundle."
+                    )
+                elif bundle_size:
                     st.caption(
                         escape_markdown(
                             f"Per bundle of {format_quantity(bundle_size)}: "

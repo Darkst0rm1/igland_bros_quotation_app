@@ -19,6 +19,7 @@ from collections import Counter
 from dataclasses import dataclass
 from decimal import Decimal
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from modules import settings_service
@@ -316,17 +317,64 @@ def _quotation_container_total(
 ) -> Decimal:
     """Containers on this quotation, for the tier minimums.
 
+    Three sources, in order of how much they are worth trusting.
+
     The **shipment is authoritative when one exists** — it is the real shipping
-    plan, with a row per container configuration. Quotations raised before
-    container shipping existed have no shipment, and fall back to the per-line
-    ``container_count`` they were built with, so their warnings are unchanged.
+    plan, with a row per container configuration. Failing that, a
+    ``container_count`` typed onto the lines is somebody's own statement of the
+    shipment and is taken at face value.
+
+    Only when neither exists is the total **estimated from catalogue capacity**:
+    each line's packs divided by the packs that fit in a container. That turns
+    the imported capacity workbook into a warning where previously there was
+    silence — a quotation priced at the eight-container tier with nothing
+    entered anywhere used to total zero containers and warn about it, which was
+    right by accident rather than informative.
+
+    The estimate is deliberately last. It is only as good as the workbook, and
+    the workbook has at least one figure that cannot be right; anything a human
+    has actually stated outranks it.
     """
     from modules.shipping_service import total_containers
 
     from_shipment = total_containers(session, quotation.id)
     if from_shipment > ZERO:
         return from_shipment
-    return sum((to_decimal(item.container_count) for item in items), ZERO)
+
+    from_lines = sum((to_decimal(item.container_count) for item in items), ZERO)
+    if from_lines > ZERO:
+        return from_lines
+
+    return _estimated_container_total(session, items)
+
+
+def _estimated_container_total(
+    session: Session, items: list[QuotationItem]
+) -> Decimal:
+    """Containers implied by the quantities and the catalogue capacity.
+
+    A line whose product has no capacity row contributes nothing rather than
+    being assumed to fill a container, so a partly-populated catalogue
+    understates the total instead of inventing one.
+    """
+    from modules.repositories import get_variant
+
+    total = ZERO
+    for item in items:
+        if not item.product_variant_id:
+            continue
+        variant = get_variant(session, item.product_variant_id)
+        if variant is None:
+            continue
+        capacity = session.execute(
+            select(ProductContainerCapacity).where(
+                ProductContainerCapacity.product_id == variant.product_id
+            )
+        ).scalars().first()
+        share = containers_for_quantity(item.quantity_packs, capacity)
+        if share is not None:
+            total += share
+    return total
 
 
 def _duplicate_freight_warnings(
