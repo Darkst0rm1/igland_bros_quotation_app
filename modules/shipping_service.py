@@ -517,6 +517,34 @@ def container_capacity(
     ).scalar_one_or_none()
 
 
+def container_capacity_for_product(
+    session: Session, product_id: int
+) -> ProductContainerCapacity | None:
+    """Whatever capacity is on file for a product, without naming a container.
+
+    For the line editor, which is showing the operator a figure before any
+    container has been chosen. Prefers the configured default container, then
+    the largest recorded capacity, so a catalogue holding only 20 ft rows still
+    shows something rather than nothing.
+    """
+    from modules import settings_service
+
+    preferred = container_capacity(
+        session,
+        product_id,
+        settings_service.default_container_size(session),
+        settings_service.default_container_type(session),
+    )
+    if preferred is not None:
+        return preferred
+
+    return session.execute(
+        select(ProductContainerCapacity)
+        .where(ProductContainerCapacity.product_id == product_id)
+        .order_by(ProductContainerCapacity.bundles_per_container.desc())
+    ).scalars().first()
+
+
 def allocate_product(
     session: Session,
     user: AuthUser,

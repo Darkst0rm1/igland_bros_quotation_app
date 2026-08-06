@@ -585,7 +585,19 @@ with lines_tab:
                 available = pricing_service.prices_for_picker(
                     db, variant["id"], header["quote_date"], ccy
                 )
-                bundle_size = db.get(Product, product_id).units_per_bundle
+                capacity = shipping_service.container_capacity_for_product(
+                    db, product_id
+                )
+                bundle = (
+                    {
+                        "per_container": capacity.bundles_per_container,
+                        "container": CONTAINER_SIZE_LABELS[capacity.container_size],
+                        "is_anomalous": capacity.is_anomalous,
+                        "anomaly_note": capacity.anomaly_note,
+                    }
+                    if capacity is not None
+                    else None
+                )
             if available:
                 st.caption(
                     escape_markdown(
@@ -597,40 +609,21 @@ with lines_tab:
                         )
                     )
                 )
-                # Where a bundle is the pack — which is how this catalogue is
-                # sold — the pack price above already *is* the bundle price.
-                # Printing it again under a second heading would put two
-                # identical figures on screen and invite the reader to hunt
-                # for the difference between them.
-                if bundle_size and bundle_size == variant["case_pack"]:
+                # The bundle: how many of this size fill one container. Shown
+                # next to the prices because it is what decides whether the
+                # three- and eight-container tiers above are actually
+                # available on the quantity being typed below.
+                if bundle is not None:
                     st.caption(
-                        f"One bundle is one pack of {format_quantity(bundle_size)}, "
-                        f"so the prices above are per bundle."
+                        f"Bundle: {format_quantity(bundle['per_container'])} packs "
+                        f"per {bundle['container']} container"
                     )
-                elif bundle_size:
-                    st.caption(
-                        escape_markdown(
-                            f"Per bundle of {format_quantity(bundle_size)}: "
-                            + " · ".join(
-                                f"{next(n for c, n in tiers if c == code)} "
-                                f"{format_money(bundle, ccy)}"
-                                for code, bundle in (
-                                    (
-                                        code,
-                                        pricing_service.bundle_price(
-                                            price.price_per_piece, bundle_size
-                                        ),
-                                    )
-                                    for code, price in available.items()
-                                )
-                                if bundle is not None
-                            )
-                        )
-                    )
+                    if bundle["is_anomalous"]:
+                        st.warning(bundle["anomaly_note"], icon="⚠️")
                 else:
                     st.caption(
-                        "No bundle price: this size has no bundle quantity set. "
-                        "Add one under Products & Pricing."
+                        "No bundle quantity recorded for this size. Import the "
+                        "container-capacity workbook to add one."
                     )
             else:
                 st.warning(

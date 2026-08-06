@@ -352,3 +352,82 @@ class TestEstimatedContainerTotal:
 
         total = _quotation_container_total(session, quotation, list(quotation.items))
         assert total == D("0")
+
+
+class TestBundleShownInTheEditor:
+    """The figure the operator sees beside the tier prices."""
+
+    def test_capacity_is_found_without_naming_a_container(
+        self, session, product_with_capacity
+    ):
+        """The line editor shows it before any container has been chosen."""
+        from modules import shipping_service
+
+        product, capacity = product_with_capacity
+        found = shipping_service.container_capacity_for_product(session, product.id)
+        assert found is not None
+        assert found.bundles_per_container == capacity.bundles_per_container
+
+    def test_a_product_with_no_capacity_returns_none(self, session, seeded):
+        """So the editor says the quantity is unrecorded rather than showing a
+        figure belonging to some other size."""
+        from modules import shipping_service
+
+        product = Product(
+            item_number="WB-95", name='95" White', size_label='95" White',
+        )
+        session.add(product)
+        session.commit()
+
+        assert shipping_service.container_capacity_for_product(
+            session, product.id
+        ) is None
+
+    def test_a_non_default_container_size_is_still_found(self, session, seeded):
+        """A catalogue holding only 20 ft rows shows those rather than nothing."""
+        from modules import shipping_service
+
+        product = Product(
+            item_number="WB-94", name='94" White', size_label='94" White',
+        )
+        session.add(product)
+        session.flush()
+        session.add(
+            ProductContainerCapacity(
+                product_id=product.id,
+                container_size=ContainerSize.TWENTY_FT,
+                container_type=ContainerType.DRY,
+                bundles_per_container=D("640"),
+            )
+        )
+        session.commit()
+
+        found = shipping_service.container_capacity_for_product(session, product.id)
+        assert found is not None
+        assert found.bundles_per_container == D("640")
+
+    def test_the_anomaly_flag_travels_with_the_figure(self, session, seeded):
+        """The 20 inch row is shown, and shown as doubtful. A salesperson
+        reading 1,512 has no way to know it is twice what it should be."""
+        from modules import shipping_service
+
+        product = Product(
+            item_number="WB-20", name='20" White', size_label='20" White',
+        )
+        session.add(product)
+        session.flush()
+        session.add(
+            ProductContainerCapacity(
+                product_id=product.id,
+                container_size=ContainerSize.FORTY_FT_HC,
+                container_type=ContainerType.DRY,
+                bundles_per_container=D("1512"),
+                is_anomalous=True,
+                anomaly_note="1,512 bundles is more than the 890 recorded for the 18 inch.",
+            )
+        )
+        session.commit()
+
+        found = shipping_service.container_capacity_for_product(session, product.id)
+        assert found.is_anomalous is True
+        assert found.anomaly_note
