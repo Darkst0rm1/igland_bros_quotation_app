@@ -431,3 +431,76 @@ class TestBundleShownInTheEditor:
         found = shipping_service.container_capacity_for_product(session, product.id)
         assert found.is_anomalous is True
         assert found.anomaly_note
+
+
+class TestCasePackIsPartOfIdentity:
+    """The 20 inch correction ran into this guard, and the guard was right."""
+
+    def test_case_pack_cannot_be_edited_in_place(self, session, make_auth_user):
+        """A quotation line snapshots the case pack it was sold under, so
+        changing it would alter what a past quotation meant. The catalogue
+        makes you retire the variant and create its replacement."""
+        from modules.catalogue_service import (
+            CatalogueError,
+            create_variant,
+            update_variant,
+        )
+        from modules.validation import VariantInput
+
+        admin = make_auth_user("SYS_ADMIN")
+        product = Product(
+            item_number="WB-93", name='93" White', size_label='93" White',
+        )
+        session.add(product)
+        session.flush()
+        variant = create_variant(
+            session, admin, product.id,
+            VariantInput(
+                variant_item_number="WB-93-160-50",
+                board_quality="WT110 HPFL160 KM135", case_pack=50,
+            ),
+        )
+        session.commit()
+
+        with pytest.raises(CatalogueError, match="case pack"):
+            update_variant(
+                session, admin, variant.id,
+                VariantInput(
+                    variant_item_number="WB-93-160-25",
+                    board_quality="WT110 HPFL160 KM135", case_pack=25,
+                ),
+            )
+
+    def test_a_replacement_variant_carries_the_corrected_pack(
+        self, session, make_auth_user
+    ):
+        from modules.catalogue_service import create_variant
+        from modules.validation import VariantInput
+
+        admin = make_auth_user("SYS_ADMIN")
+        product = Product(
+            item_number="WB-92", name='92" White', size_label='92" White',
+        )
+        session.add(product)
+        session.flush()
+        old = create_variant(
+            session, admin, product.id,
+            VariantInput(
+                variant_item_number="WB-92-160-50",
+                board_quality="WT110 HPFL160 KM135", case_pack=50,
+            ),
+        )
+        new = create_variant(
+            session, admin, product.id,
+            VariantInput(
+                variant_item_number="WB-92-160-25",
+                board_quality="WT110 HPFL160 KM135", case_pack=25,
+            ),
+        )
+        old.is_active = False
+        session.commit()
+
+        assert new.case_pack == 25
+        # The old one is kept, not deleted: it records what the price list said.
+        assert old.deleted_at is None
+        assert old.is_active is False
