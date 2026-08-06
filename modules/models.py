@@ -492,6 +492,20 @@ class Product(Base, TimestampMixin, SoftDeleteMixin):
     flute: Mapped[str | None] = mapped_column(String(20), index=True)
 
     unit_of_measure: Mapped[str] = mapped_column(String(20), nullable=False, default="PACK")
+
+    #: Boxes in one bundle. Bundle composition is a property of the box, not of
+    #: the container it travels in, which is why it lives here rather than on
+    #: ``ProductContainerCapacity`` — the same bundle holds the same count in a
+    #: 20 ft and a 40 ft high cube.
+    #:
+    #: Nullable, and it stays null until someone states it. The price list
+    #: counts in packs and pieces and never mentions bundles, and the capacity
+    #: workbook gives bundles per container without saying what a bundle holds.
+    #: Nothing that depends on it — the bundle price, the container fill — is
+    #: shown for a product where it is unset, rather than being derived from a
+    #: guess.
+    units_per_bundle: Mapped[Decimal | None] = mapped_column(quantity())
+
     printing_method: Mapped[str | None] = mapped_column(String(80))
     material: Mapped[str | None] = mapped_column(String(120))
     finish: Mapped[str | None] = mapped_column(String(120))
@@ -1208,10 +1222,13 @@ class ProductContainerCapacity(Base, TimestampMixin):
     dimensionally identical. The source workbook gives one figure per size,
     which agrees with that.
 
-    ``bundles_per_container`` is the authoritative imported figure.
-    ``units_per_bundle`` is nullable because the source does not define what a
-    bundle contains — until someone supplies it, pieces and cases per container
-    are reported as unavailable rather than guessed.
+    ``bundles_per_container`` is the authoritative imported figure, and it is
+    the only one the workbook supplies. Converting it into packs — which is
+    what a quotation counts in — needs to know what a bundle holds, and that
+    lives on :attr:`Product.units_per_bundle`, because a bundle contains the
+    same number of boxes whatever container it travels in. Until it is set,
+    packs and pieces per container are reported as unavailable rather than
+    guessed.
     """
 
     __tablename__ = "product_container_capacity"
@@ -1228,7 +1245,6 @@ class ProductContainerCapacity(Base, TimestampMixin):
     )
 
     bundles_per_container: Mapped[Decimal] = mapped_column(quantity(), nullable=False)
-    units_per_bundle: Mapped[Decimal | None] = mapped_column(quantity())
     pallets_per_container: Mapped[Decimal | None] = mapped_column(quantity())
 
     source_workbook_name: Mapped[str | None] = mapped_column(String(255))
@@ -1250,10 +1266,30 @@ class ProductContainerCapacity(Base, TimestampMixin):
 
     @property
     def pieces_per_container(self) -> Decimal | None:
-        """``None`` until someone says how many units are in a bundle."""
-        if self.units_per_bundle is None:
+        """``None`` until the product says how many boxes are in a bundle."""
+        per_bundle = self.product.units_per_bundle if self.product else None
+        if per_bundle is None:
             return None
-        return self.bundles_per_container * self.units_per_bundle
+        return self.bundles_per_container * per_bundle
+
+    @property
+    def packs_per_container(self) -> Decimal | None:
+        """What a quotation actually counts in. ``None`` if either input is.
+
+        A quotation is written in packs, the workbook counts containers in
+        bundles, and nothing connects the two but the bundle size. Returning
+        ``None`` keeps a container estimate off the screen entirely rather
+        than showing one derived from an assumed bundle.
+        """
+        pieces = self.pieces_per_container
+        case_pack = None
+        if self.product is not None:
+            case_pack = next(
+                (v.case_pack for v in self.product.variants if v.case_pack), None
+            )
+        if pieces is None or not case_pack:
+            return None
+        return pieces / Decimal(case_pack)
 
 
 class QuotationShipment(Base, TimestampMixin):

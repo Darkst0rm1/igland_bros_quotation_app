@@ -272,8 +272,10 @@ def commit(
     """Write the capacities, matching rows to products by size label.
 
     ``units_per_bundle`` may be supplied for the whole workbook when the source
-    does not state it. Left as ``None``, pieces and cases per container stay
-    unavailable rather than being derived from a guess.
+    does not state it. It is written onto the **product**, since a bundle holds
+    the same count in any container. Left as ``None``, the product keeps
+    whatever bundle size it already had — an import of container capacities
+    must not erase a figure somebody entered by hand in the catalogue.
     """
     require(user, Perm.PRICE_IMPORT)
 
@@ -306,9 +308,9 @@ def commit(
         )
         target.bundles_per_container = row.bundles_per_container
         if row.units_per_bundle is not None:
-            target.units_per_bundle = row.units_per_bundle
+            product.units_per_bundle = row.units_per_bundle
         elif units_per_bundle is not None:
-            target.units_per_bundle = to_decimal(units_per_bundle)
+            product.units_per_bundle = to_decimal(units_per_bundle)
         if row.pallets_per_container is not None:
             target.pallets_per_container = row.pallets_per_container
         target.source_workbook_name = file_name

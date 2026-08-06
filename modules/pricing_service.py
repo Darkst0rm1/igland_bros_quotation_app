@@ -22,14 +22,19 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from modules import settings_service
-from modules.calculation_engine import ZERO, piece_pack_mismatch, to_decimal
+from modules.calculation_engine import ZERO, piece_pack_mismatch, q_money, to_decimal
 from modules.constants import (
     PriceTierCode,
     PriceWarningCode,
     PricingBasis,
     WarningSeverity,
 )
-from modules.models import ProductPrice, Quotation, QuotationItem
+from modules.models import (
+    ProductContainerCapacity,
+    ProductPrice,
+    Quotation,
+    QuotationItem,
+)
 from modules.repositories import (
     get_effective_price,
     get_latest_price,
@@ -458,3 +463,48 @@ def prices_for_picker(
         for code, price in prices.items()
         if code != PriceTierCode.CUSTOM.value
     }
+
+
+# --------------------------------------------------------------------------- #
+# Bundles
+# --------------------------------------------------------------------------- #
+
+def bundle_price(
+    price_per_piece: Decimal | None,
+    units_per_bundle: Decimal | None,
+) -> Decimal | None:
+    """What one bundle costs, or ``None`` when the bundle size is unstated.
+
+    Derived from the **piece** price rather than the pack price. A bundle is
+    not guaranteed to be a whole number of packs, and pack ÷ case_pack × units
+    would round twice where this rounds once.
+
+    ``None`` rather than zero for an unknown bundle, because zero is a price
+    and would print as one.
+    """
+    if price_per_piece is None or units_per_bundle is None:
+        return None
+    if units_per_bundle <= ZERO:
+        return None
+    return q_money(to_decimal(price_per_piece) * to_decimal(units_per_bundle))
+
+
+def containers_for_quantity(
+    quantity_packs: Decimal | None,
+    capacity: ProductContainerCapacity | None,
+) -> Decimal | None:
+    """How many containers a quantity fills, or ``None`` if it cannot be known.
+
+    The capacity workbook counts containers in bundles and a quotation counts
+    in packs, so this needs the bundle size to bridge them. Where that is
+    unset the answer is ``None`` and the caller falls back to the container
+    count typed by hand — an estimate built on an assumed bundle would feed
+    the pricing-tier warnings, and those decide whether a customer is quoted
+    the three- or eight-container rate.
+    """
+    if quantity_packs is None or capacity is None:
+        return None
+    packs_per_container = capacity.packs_per_container
+    if not packs_per_container:
+        return None
+    return to_decimal(quantity_packs) / to_decimal(packs_per_container)

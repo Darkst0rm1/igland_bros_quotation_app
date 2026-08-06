@@ -625,7 +625,11 @@ def _recalculate_allocation(
         to_decimal(allocation.quantity_per_container) * count
     )
 
-    units_per_bundle = capacity.units_per_bundle if capacity else None
+    units_per_bundle = (
+        capacity.product.units_per_bundle
+        if capacity is not None and capacity.product is not None
+        else None
+    )
     if allocation.bundles_per_container is not None and units_per_bundle is not None:
         pieces = to_decimal(allocation.bundles_per_container) * to_decimal(units_per_bundle)
         allocation.pieces_per_container = q_quantity(pieces)

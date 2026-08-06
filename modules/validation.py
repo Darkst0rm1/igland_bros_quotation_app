@@ -264,6 +264,9 @@ class ProductInput(BaseModel):
     depth_in: Decimal | None = None
     flute: str | None = Field(default=None, max_length=20)
     unit_of_measure: str = "PACK"
+    #: Boxes in a bundle. Left unset until someone states it: nothing derived
+    #: from it is shown for a product where it is blank.
+    units_per_bundle: Decimal | None = None
     printing_method: str | None = Field(default=None, max_length=80)
     material: str | None = Field(default=None, max_length=120)
     finish: str | None = Field(default=None, max_length=120)
@@ -276,6 +279,19 @@ class ProductInput(BaseModel):
     @classmethod
     def _parse_dimension(cls, value: Any) -> Any:
         return coerce_decimal(value)
+
+    @field_validator("units_per_bundle", mode="before")
+    @classmethod
+    def _parse_bundle(cls, value: Any) -> Any:
+        # Zero and blank both mean "not stated". Storing zero would make the
+        # bundle price zero rather than absent, and a zero price on a
+        # quotation is far worse than a missing one.
+        parsed = coerce_decimal(value)
+        if parsed is None or parsed == 0:
+            return None
+        if parsed < 0:
+            raise ValueError("a bundle cannot contain a negative number of boxes")
+        return parsed
 
 
 class VariantInput(BaseModel):

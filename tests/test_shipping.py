@@ -619,7 +619,7 @@ class TestCapacityImport:
         )
         assert capacity.bundles_per_container == D("1880")
         # The source does not say what a bundle holds, so pieces stay unknown.
-        assert capacity.units_per_bundle is None
+        assert product.units_per_bundle is None
         assert capacity.pieces_per_container is None
 
     def test_a_product_that_does_not_exist_is_skipped_not_invented(

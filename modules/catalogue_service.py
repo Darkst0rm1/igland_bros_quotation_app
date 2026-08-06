@@ -51,6 +51,7 @@ def _product_snapshot(product: Product) -> dict[str, object]:
         "category": product.category,
         "depth_in": product.depth_in,
         "flute": product.flute,
+        "units_per_bundle": product.units_per_bundle,
         "material": product.material,
         "finish": product.finish,
         "is_perforated": product.is_perforated,

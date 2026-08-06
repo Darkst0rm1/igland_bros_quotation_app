@@ -52,7 +52,7 @@ from modules.constants import (
     SendMethod,
 )
 from modules.database import session_scope
-from modules.models import CustomerResponseLog, Quotation, TermTemplate
+from modules.models import CustomerResponseLog, Product, Quotation, TermTemplate
 from modules.quotation_service import QuotationError
 from modules.revision_service import RevisionError
 from modules.shipping_service import ShippingError
@@ -585,6 +585,7 @@ with lines_tab:
                 available = pricing_service.prices_for_picker(
                     db, variant["id"], header["quote_date"], ccy
                 )
+                bundle_size = db.get(Product, product_id).units_per_bundle
             if available:
                 st.caption(
                     escape_markdown(
@@ -596,6 +597,31 @@ with lines_tab:
                         )
                     )
                 )
+                if bundle_size:
+                    st.caption(
+                        escape_markdown(
+                            f"Per bundle of {format_quantity(bundle_size)}: "
+                            + " · ".join(
+                                f"{next(n for c, n in tiers if c == code)} "
+                                f"{format_money(bundle, ccy)}"
+                                for code, bundle in (
+                                    (
+                                        code,
+                                        pricing_service.bundle_price(
+                                            price.price_per_piece, bundle_size
+                                        ),
+                                    )
+                                    for code, price in available.items()
+                                )
+                                if bundle is not None
+                            )
+                        )
+                    )
+                else:
+                    st.caption(
+                        "No bundle price: this size has no bundle quantity set. "
+                        "Add one under Products & Pricing."
+                    )
             else:
                 st.warning(
                     f"No {ccy} price is in force for this variant on "

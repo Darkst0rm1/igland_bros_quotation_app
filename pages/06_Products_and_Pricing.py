@@ -159,6 +159,7 @@ with catalogue_tab:
                     "printing_method": p.printing_method or "",
                     "is_perforated": p.is_perforated,
                     "lock_style": p.lock_style or "",
+                    "units_per_bundle": p.units_per_bundle,
                     "is_active": p.is_active,
                 }
                 for p in search_products(db, include_inactive=True)
@@ -214,6 +215,22 @@ with catalogue_tab:
                     finish = st.text_input(
                         "Finish", value=target["finish"] if target else ""
                     )
+                bundle_size = st.number_input(
+                    "Boxes per bundle",
+                    min_value=0,
+                    step=1,
+                    value=(
+                        int(target["units_per_bundle"])
+                        if target and target["units_per_bundle"]
+                        else 0
+                    ),
+                    help=(
+                        "How many boxes are strapped into one bundle of this size. "
+                        "Leave at 0 if it is not settled — the bundle price and the "
+                        "container estimate are then left off rather than guessed. "
+                        "Neither the price list nor the capacity workbook states it."
+                    ),
+                )
                 perf_choices = ["Not specified", "Perforated", "Non-perforated"]
                 perf_index = (
                     0 if not target or target["is_perforated"] is None
@@ -237,6 +254,7 @@ with catalogue_tab:
                         size_label=size_label,
                         category=category or None,
                         depth_in=Decimal(str(depth)) if depth else None,
+                        units_per_bundle=bundle_size or None,
                         flute=flute or None,
                         material=material or None,
                         finish=finish or None,
