@@ -15,13 +15,14 @@ import streamlit as st
 from sqlalchemy import or_, select
 from sqlalchemy.orm import selectinload
 
-from modules.authorization import quotation_scope_filter
+from modules import quotation_service
+from modules.authorization import PermissionDenied, quotation_scope_filter
 from modules.constants import STATUS_DISPLAY_NAMES, Perm, QuotationStatus
 from modules.database import session_scope
 from modules.models import Customer, Quotation, User
 from modules.repositories import LIKE_ESCAPE, _like
 from modules.session import page_header, require_page
-from modules.utilities import empty_frame, format_date, format_money
+from modules.utilities import empty_frame, escape_markdown, format_date, format_money
 
 user = require_page(Perm.QUOTE_VIEW_OWN)
 page_header("Quotation History", "Search, open and export quotations")
@@ -56,6 +57,15 @@ with row_a[2]:
         value=False,
         help="Off shows only the current revision of each quotation.",
     )
+    can_restore = user.has(Perm.QUOTE_DELETE_ANY)
+    show_deleted = can_restore and st.checkbox(
+        "Deleted",
+        value=False,
+        help=(
+            "Show deleted quotations instead of live ones, so one removed by "
+            "mistake can be found and restored."
+        ),
+    )
 
 row_b = st.columns([1.5, 1.5, 2])
 with row_b[0]:
@@ -76,7 +86,11 @@ with session_scope() as db:
     stmt = (
         select(Quotation)
         .options(selectinload(Quotation.items))
-        .where(Quotation.deleted_at.is_(None))
+        .where(
+            Quotation.deleted_at.is_not(None)
+            if show_deleted
+            else Quotation.deleted_at.is_(None)
+        )
         .where(quotation_scope_filter(user))
         .order_by(Quotation.quote_date.desc(), Quotation.id.desc())
     )
@@ -142,6 +156,9 @@ with session_scope() as db:
             "_id": q.id,
             "_lines": len(q.items),
             "_raw_total": q.grand_total,
+            "_status": q.status,
+            "_locked": q.is_locked,
+            "_deletable": quotation_service.can_delete(user, q),
         }
         for q in quotations
     ]
@@ -150,10 +167,13 @@ st.caption(f"{len(rows)} quotation{'s' if len(rows) != 1 else ''}")
 
 if not rows:
     st.dataframe(empty_frame(COLUMNS), width="stretch", hide_index=True)
-    st.info(
-        "No quotations match. Create one from the **Create Quotation** page, or clear "
-        "the filters."
-    )
+    if show_deleted:
+        st.info("Nothing has been deleted.")
+    else:
+        st.info(
+            "No quotations match. Create one from the **Create Quotation** page, or "
+            "clear the filters."
+        )
     st.stop()
 
 st.dataframe(
@@ -165,7 +185,9 @@ currencies = {r["Currency"] for r in rows}
 if len(currencies) == 1:
     # Only meaningful when everything shown is in one currency; summing across
     # currencies would produce a number that means nothing.
-    st.caption(f"Total value shown: {format_money(total_value, currencies.pop())}")
+    st.caption(
+        escape_markdown(f"Total value shown: {format_money(total_value, currencies.pop())}")
+    )
 else:
     st.caption(
         f"Results span {len(currencies)} currencies, so no total is shown."
@@ -187,10 +209,12 @@ with open_col:
             f"{r['Number']} Rev {r['Rev']} — {r['Customer']} — {r['Total']}"
         ),
     )
-    if st.button("Open", type="primary"):
+    if st.button("Open", type="primary", disabled=show_deleted):
         st.session_state["active_quotation_id"] = picked["_id"]
         st.query_params["quote_id"] = str(picked["_id"])
         st.switch_page("pages/02_Create_Quotation.py")
+    if show_deleted:
+        st.caption("Restore a quotation before opening it.")
 
 with export_col:
     if user.has(Perm.QUOTE_EXPORT):
@@ -212,7 +236,92 @@ with export_col:
         )
         st.caption("Exports exactly the rows shown, with the filters applied.")
 
-st.caption(
-    "Duplicating a quotation, creating a revision and downloading the PDF or Word "
-    "document arrive in Phase 4."
-)
+
+# --------------------------------------------------------------------------- #
+# Delete / restore
+# --------------------------------------------------------------------------- #
+
+if show_deleted:
+    st.divider()
+    st.markdown("##### Restore a deleted quotation")
+    st.caption(
+        "Puts it back into the history, the reports and the approval queue exactly "
+        "as it was. Nothing was thrown away when it was deleted."
+    )
+    if st.button(f"Restore {picked['Number']}", type="primary"):
+        try:
+            with session_scope() as db:
+                target = db.get(Quotation, picked["_id"])
+                count = quotation_service.restore_quotation(db, user, target)
+        except PermissionDenied as exc:
+            st.error(str(exc))
+        else:
+            st.toast(
+                f"{picked['Number']} restored ({count} revision(s))", icon="✅"
+            )
+            st.rerun()
+
+elif picked["_deletable"]:
+    st.divider()
+    with st.expander(f"Delete {picked['Number']}"):
+        with session_scope() as db:
+            family = quotation_service.revision_family(
+                db, db.get(Quotation, picked["_id"])
+            )
+            revision_count = len(family)
+
+        # Deleting one revision of a family would leave the rest with nothing
+        # marked current, so the whole family goes. Saying so up front matters:
+        # the row on screen says "Rev 2" and the user is about to remove three.
+        if revision_count > 1:
+            st.warning(
+                f"{picked['Number']} has {revision_count} revisions. All of them "
+                f"will be deleted together — a quotation is deleted as a whole, "
+                f"not one revision at a time."
+            )
+
+        if picked["_locked"] or picked["_status"] is not QuotationStatus.DRAFT:
+            st.warning(
+                f"This quotation is **{picked['Status']}**, not a draft. If it has "
+                f"been sent, consider cancelling it instead — a cancelled quotation "
+                f"stays in the history as a record of what the customer was quoted."
+            )
+
+        st.caption(
+            "Deletion is reversible: the quotation is hidden rather than erased, "
+            "and an administrator can restore it. The quotation number stays "
+            f"used — nothing later will be issued as {picked['Number']}."
+        )
+        reason = st.text_input(
+            "Reason (optional)", placeholder="Recorded in the audit log",
+            key="delete_reason",
+        )
+        confirmed = st.checkbox(
+            f"Yes, delete {picked['Number']}", key="delete_confirm"
+        )
+        if st.button("Delete", type="primary", disabled=not confirmed):
+            try:
+                with session_scope() as db:
+                    target = db.get(Quotation, picked["_id"])
+                    count = quotation_service.delete_quotation(
+                        db, user, target, reason=reason.strip() or None
+                    )
+            except PermissionDenied as exc:
+                st.error(str(exc))
+            else:
+                st.session_state.pop("delete_confirm", None)
+                if st.session_state.get("active_quotation_id") == picked["_id"]:
+                    # Otherwise the editor reopens a quotation that is now gone.
+                    st.session_state.pop("active_quotation_id", None)
+                st.toast(
+                    f"{picked['Number']} deleted ({count} revision(s))", icon="🗑️"
+                )
+                st.rerun()
+
+elif user.has(Perm.QUOTE_DELETE_DRAFT):
+    st.divider()
+    st.caption(
+        f"{picked['Number']} cannot be deleted from here: it is "
+        f"{picked['Status'].lower()} rather than a draft of yours. Deleting an "
+        "issued quotation requires the quote.delete_any permission."
+    )

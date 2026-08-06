@@ -31,6 +31,29 @@ def format_money(
     return f"{symbol}{value:,.{decimals}f}"
 
 
+def escape_markdown(text: str) -> str:
+    """Protect a string containing money from Streamlit's markdown renderer.
+
+    ``st.caption``, ``st.markdown`` and the alert boxes render LaTeX, and a
+    dollar sign opens a maths span. Two of them on one line — which is every
+    price comparison this application draws — makes the text between them
+    disappear into italic maths and swallows both signs::
+
+        Available: Standard $5.98 · Three Containers $5.80 · Eight Containers $5.62
+        Available: Standard 5.98 Three Containers 5.80 · Eight Containers $5.62
+                                 ^^^^^^^^^^^^^^^^ rendered as maths
+
+    The prices are still legible, which is what makes this dangerous: it reads
+    as a formatting quirk rather than as two mangled figures, and the tier a
+    salesperson picks from it is the price a customer is quoted.
+
+    Applied to whole composed strings at the point of display, never inside
+    :func:`format_money` — the same formatter feeds PDFs, Word documents,
+    dataframes and Excel exports, where a backslash would print literally.
+    """
+    return text.replace("$", r"\$")
+
+
 def format_pack_price(value: Decimal | None, currency: str = "USD") -> str:
     """Pack prices: 4 dp.
 

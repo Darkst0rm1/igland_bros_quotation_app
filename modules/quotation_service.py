@@ -26,6 +26,7 @@ from modules import settings_service
 from modules.audit_service import record_audit, record_field_changes
 from modules.authorization import (
     AuthUser,
+    PermissionDenied,
     can_edit_quotation,
     require,
     require_edit_quotation,
@@ -1043,3 +1044,140 @@ def validate_for_submission(session: Session, quotation: Quotation) -> list[str]
 
 def can_edit(user: AuthUser, quotation: Quotation) -> bool:
     return can_edit_quotation(user, quotation)
+
+
+# --------------------------------------------------------------------------- #
+# Deletion
+# --------------------------------------------------------------------------- #
+
+def revision_family(session: Session, quotation: Quotation) -> list[Quotation]:
+    """Every revision sharing this quotation's number, oldest first.
+
+    Deletion works on the family rather than the row. "Delete QT-2026-0001"
+    means the quotation, and removing Rev 2 on its own would leave Rev 1 in the
+    list with nothing marked as current — a quotation that cannot be opened
+    from the history page and does not appear in it either.
+    """
+    root_id = quotation.root_quotation_id or quotation.id
+    return list(
+        session.execute(
+            select(Quotation)
+            .where(Quotation.root_quotation_id == root_id)
+            .order_by(Quotation.revision_no)
+        ).scalars().all()
+    )
+
+
+def can_delete(user: AuthUser, quotation: Quotation) -> bool:
+    """Whether ``user`` may delete this quotation.
+
+    An unissued draft is a working document: whoever may edit it may remove it.
+    Anything issued is a record of what was actually sent to a customer, so it
+    takes the stronger permission — the ordinary delete must not be able to
+    make a sent quotation disappear.
+    """
+    if user.has(Perm.QUOTE_DELETE_ANY):
+        return True
+    if not user.has(Perm.QUOTE_DELETE_DRAFT):
+        return False
+    return can_edit_quotation(user, quotation)
+
+
+def delete_quotation(
+    session: Session,
+    user: AuthUser,
+    quotation: Quotation,
+    reason: str | None = None,
+) -> int:
+    """Soft-delete a quotation and every revision of it. Returns the count.
+
+    Soft throughout. The rows stay, ``deleted_at`` is set, and an administrator
+    can restore them, because "delete" pressed on the wrong row is otherwise
+    unrecoverable without a database restore — and the quotations here carry
+    prices that were quoted to a customer.
+
+    The quotation number is *not* released. Numbers come from a
+    ``DocumentSequence`` counter rather than from a count of rows, so a deleted
+    QT-2026-0007 stays spent and no later quotation can be issued under a
+    number a customer has already seen on a different document.
+
+    Already-deleted revisions are skipped rather than refreshed, so the
+    ``deleted_at`` of an earlier deletion is preserved.
+    """
+    if not can_delete(user, quotation):
+        if quotation.is_locked or quotation.status is not QuotationStatus.DRAFT:
+            raise PermissionDenied(
+                str(Perm.QUOTE_DELETE_ANY),
+                f"{quotation.display_number} has been issued. Deleting it requires "
+                f"the quote.delete_any permission; cancelling it may be what you want.",
+            )
+        raise PermissionDenied(
+            str(Perm.QUOTE_DELETE_DRAFT),
+            f"{quotation.display_number} is not a draft you may delete.",
+        )
+
+    family = revision_family(session, quotation)
+    now = dt.datetime.now(dt.UTC)
+
+    deleted = 0
+    for revision in family:
+        if revision.deleted_at is not None:
+            continue
+        revision.deleted_at = now
+        revision.updated_by_id = user.id
+        deleted += 1
+        record_audit(
+            session, user, AuditAction.QUOTATION_DELETED,
+            EntityType.QUOTATION, revision.id,
+            old_value={
+                "status": str(revision.status),
+                "grand_total": str(revision.grand_total),
+            },
+            new_value={"deleted_at": now.isoformat()},
+            reason=reason,
+        )
+
+    session.flush()
+    log.info(
+        "Quotation %s deleted by %s (%d revision(s))",
+        quotation.quote_number, user.username, deleted,
+    )
+    return deleted
+
+
+def restore_quotation(
+    session: Session,
+    user: AuthUser,
+    quotation: Quotation,
+    reason: str | None = None,
+) -> int:
+    """Undo a deletion, for the whole family. Returns the count restored.
+
+    Requires ``quote.delete_any`` even for a draft the caller could have
+    deleted themselves: restoring puts a quotation back into everyone's history
+    and reports, which is a wider act than removing your own working copy.
+    """
+    require(user, Perm.QUOTE_DELETE_ANY)
+
+    restored = 0
+    for revision in revision_family(session, quotation):
+        if revision.deleted_at is None:
+            continue
+        was = revision.deleted_at
+        revision.deleted_at = None
+        revision.updated_by_id = user.id
+        restored += 1
+        record_audit(
+            session, user, AuditAction.QUOTATION_RESTORED,
+            EntityType.QUOTATION, revision.id,
+            old_value={"deleted_at": was.isoformat()},
+            new_value={"deleted_at": None},
+            reason=reason,
+        )
+
+    session.flush()
+    log.info(
+        "Quotation %s restored by %s (%d revision(s))",
+        quotation.quote_number, user.username, restored,
+    )
+    return restored

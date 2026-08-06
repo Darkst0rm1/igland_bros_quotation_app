@@ -62,6 +62,13 @@ class Perm(StrEnum):
     QUOTE_CREATE_REVISION = "quote.create_revision"
     QUOTE_CANCEL = "quote.cancel"
     QUOTE_EXPORT = "quote.export"
+    #: Remove an unissued draft. Deletion is soft throughout — the row stays,
+    #: its number stays consumed, and an administrator can restore it.
+    QUOTE_DELETE_DRAFT = "quote.delete_draft"
+    #: Remove a quotation that has already been issued, and restore anything
+    #: deleted. Separate because an issued quotation is a record of what was
+    #: actually sent to a customer, which the ordinary delete must not touch.
+    QUOTE_DELETE_ANY = "quote.delete_any"
 
     # Internal financials
     COST_VIEW = "cost.view"
@@ -118,7 +125,7 @@ PERMISSION_CATEGORIES: dict[Perm, str] = {
         Perm.QUOTE_RETURN_FOR_REVISION, Perm.QUOTE_OVERRIDE_WARNING,
         Perm.QUOTE_APPROVE_CUSTOM_PRICE, Perm.QUOTE_GENERATE_PDF,
         Perm.QUOTE_UPDATE_STATUS, Perm.QUOTE_CREATE_REVISION, Perm.QUOTE_CANCEL,
-        Perm.QUOTE_EXPORT,
+        Perm.QUOTE_EXPORT, Perm.QUOTE_DELETE_DRAFT, Perm.QUOTE_DELETE_ANY,
     )},
     **{p: "Internal financials" for p in (
         Perm.COST_VIEW, Perm.COST_MANAGE, Perm.MARGIN_VIEW,
@@ -155,6 +162,7 @@ ROLE_PERMISSIONS: dict[RoleCode, frozenset[Perm]] = {
         Perm.QUOTE_CREATE, Perm.QUOTE_EDIT_OWN_DRAFT, Perm.QUOTE_VIEW_OWN,
         Perm.QUOTE_SUBMIT_FOR_APPROVAL, Perm.QUOTE_GENERATE_PDF,
         Perm.QUOTE_UPDATE_STATUS, Perm.QUOTE_CREATE_REVISION, Perm.QUOTE_EXPORT,
+        Perm.QUOTE_DELETE_DRAFT,
         Perm.CUSTOMER_VIEW, Perm.CUSTOMER_CREATE, Perm.CUSTOMER_EDIT,
         Perm.PRODUCT_VIEW, Perm.PRICE_VIEW,
         Perm.SHIPMENT_EDIT,
@@ -167,7 +175,7 @@ ROLE_PERMISSIONS: dict[RoleCode, frozenset[Perm]] = {
         Perm.QUOTE_RETURN_FOR_REVISION, Perm.QUOTE_OVERRIDE_WARNING,
         Perm.QUOTE_APPROVE_CUSTOM_PRICE, Perm.QUOTE_GENERATE_PDF,
         Perm.QUOTE_UPDATE_STATUS, Perm.QUOTE_CREATE_REVISION, Perm.QUOTE_CANCEL,
-        Perm.QUOTE_EXPORT,
+        Perm.QUOTE_EXPORT, Perm.QUOTE_DELETE_DRAFT,
         Perm.COST_VIEW, Perm.MARGIN_VIEW,
         Perm.CUSTOMER_VIEW, Perm.CUSTOMER_CREATE, Perm.CUSTOMER_EDIT, Perm.CUSTOMER_DELETE,
         Perm.PRODUCT_VIEW, Perm.PRICE_VIEW,
@@ -640,6 +648,8 @@ class AuditAction(StrEnum):
     STATUS_CHANGED = "STATUS_CHANGED"
     REVISION_CREATED = "REVISION_CREATED"
     CUSTOMER_RESPONSE_LOGGED = "CUSTOMER_RESPONSE_LOGGED"
+    QUOTATION_DELETED = "QUOTATION_DELETED"
+    QUOTATION_RESTORED = "QUOTATION_RESTORED"
 
     CUSTOMER_CREATED = "CUSTOMER_CREATED"
     CUSTOMER_EDITED = "CUSTOMER_EDITED"

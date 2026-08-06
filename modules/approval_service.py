@@ -457,7 +457,13 @@ def queue(session: Session, user: AuthUser) -> list[tuple[Approval, Quotation]]:
     rows = session.execute(
         select(Approval, Quotation)
         .join(Quotation, Approval.quotation_id == Quotation.id)
-        .where(Approval.decision == ApprovalDecision.PENDING)
+        .where(
+            Approval.decision == ApprovalDecision.PENDING,
+            # A deleted quotation leaves its pending request behind. Without
+            # this the queue offers an approver a quotation that no longer
+            # appears anywhere else, and approving it would issue one.
+            Quotation.deleted_at.is_(None),
+        )
         .order_by(Approval.requested_at)
     ).all()
 

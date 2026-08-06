@@ -64,6 +64,7 @@ from modules.repositories import (
 )
 from modules.session import page_header, require_page
 from modules.utilities import (
+    escape_markdown,
     format_date,
     format_money,
     format_pack_price,
@@ -168,6 +169,16 @@ with session_scope() as db:
     quotation = db.get(Quotation, quotation_id)
     if quotation is None:
         st.error("That quotation no longer exists.")
+        _close()
+        st.stop()
+    if quotation.deleted_at is not None:
+        # A stale session key or a bookmarked ?quote_id= would otherwise reopen
+        # a deleted quotation and let it be edited back into circulation
+        # without it appearing anywhere in the history.
+        st.error(
+            f"{quotation.display_number} has been deleted. An administrator can "
+            "restore it from the Quotation History page."
+        )
         _close()
         st.stop()
 
@@ -353,10 +364,12 @@ with st.sidebar:
     st.markdown("### Summary")
     st.metric("Grand total", format_money(header["grand_total"], ccy))
     st.caption(
-        f"Subtotal {format_money(header['subtotal'], ccy)}  \n"
-        f"Discount −{format_money(header['quote_discount_amount'], ccy)}  \n"
-        f"Charges {format_money(header['charges_total'], ccy)}  \n"
-        f"Tax {format_money(header['tax_amount'], ccy)}"
+        escape_markdown(
+            f"Subtotal {format_money(header['subtotal'], ccy)}  \n"
+            f"Discount −{format_money(header['quote_discount_amount'], ccy)}  \n"
+            f"Charges {format_money(header['charges_total'], ccy)}  \n"
+            f"Tax {format_money(header['tax_amount'], ccy)}"
+        )
     )
     st.divider()
     st.caption(f"{len(lines)} line(s) · {len(charges)} charge(s)")
@@ -368,8 +381,10 @@ with st.sidebar:
         st.caption("Never printed on a customer document.")
         st.metric("Gross margin", f"{header['gross_margin_pct']:.2f}%")
         st.caption(
-            f"Cost {format_money(header['total_cost'], ccy)} · "
-            f"Profit {format_money(header['gross_profit'], ccy)}"
+            escape_markdown(
+                f"Cost {format_money(header['total_cost'], ccy)} · "
+                f"Profit {format_money(header['gross_profit'], ccy)}"
+            )
         )
 
     if warnings:
@@ -572,11 +587,13 @@ with lines_tab:
                 )
             if available:
                 st.caption(
-                    "Available: "
-                    + " · ".join(
-                        f"{next(n for c, n in tiers if c == code)} "
-                        f"{format_pack_price(price.price_per_pack, ccy)}"
-                        for code, price in available.items()
+                    escape_markdown(
+                        "Available: "
+                        + " · ".join(
+                            f"{next(n for c, n in tiers if c == code)} "
+                            f"{format_pack_price(price.price_per_pack, ccy)}"
+                            for code, price in available.items()
+                        )
                     )
                 )
             else:
@@ -1209,7 +1226,9 @@ with charges_tab:
             with session_scope() as db:
                 rate = settings_service.plate_rate(db)
                 plate_ccy = settings_service.plate_currency(db)
-            st.caption(f"Rate: {format_money(rate, plate_ccy)} per size per colour.")
+            st.caption(
+                escape_markdown(f"Rate: {format_money(rate, plate_ccy)} per size per colour.")
+            )
             with st.form("plate_charge"):
                 p_a, p_b, p_c = st.columns(3)
                 with p_a:
