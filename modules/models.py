@@ -35,6 +35,7 @@ from sqlalchemy import (
     UniqueConstraint,
     event,
     func,
+    text,
 )
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB
@@ -54,8 +55,11 @@ from modules.constants import (
     ImportJobStatus,
     ImportRowAction,
     ImportRowStatus,
+    ItemInclusion,
+    PortalResponseType,
     PricingBasis,
     QuotationStatus,
+    QuoteEventType,
     SendMethod,
     TermSection,
 )
@@ -756,6 +760,13 @@ class Quotation(Base, TimestampMixin, SoftDeleteMixin):
     gross_profit: Mapped[Decimal | None] = mapped_column(money())
     gross_margin_pct: Mapped[Decimal | None] = mapped_column(percentage())
 
+    #: Deposit requested up front, as a percentage of the grand total. Stored
+    #: as a rate rather than an amount so it cannot drift out of step with the
+    #: total when the quotation is revised; the money figure is derived.
+    deposit_pct: Mapped[Decimal] = mapped_column(
+        percentage(), nullable=False, default=Decimal("0"), server_default="0"
+    )
+
     requires_approval: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
     )
@@ -786,6 +797,17 @@ class Quotation(Base, TimestampMixin, SoftDeleteMixin):
     approvals: Mapped[list[Approval]] = relationship(back_populates="quotation")
     response_logs: Mapped[list[CustomerResponseLog]] = relationship(
         back_populates="quotation"
+    )
+    access_tokens: Mapped[list[QuoteAccessToken]] = relationship(
+        back_populates="quotation", cascade="all, delete-orphan"
+    )
+    quote_events: Mapped[list[QuoteEvent]] = relationship(
+        back_populates="quotation", cascade="all, delete-orphan",
+        order_by="QuoteEvent.occurred_at",
+    )
+    portal_responses: Mapped[list[PortalResponse]] = relationship(
+        back_populates="quotation", cascade="all, delete-orphan",
+        order_by="PortalResponse.submitted_at",
     )
 
     __table_args__ = (
@@ -821,6 +843,15 @@ class QuotationItem(Base, TimestampMixin):
     #: the denormalised prices below, this is what makes an issued quotation
     #: reproducible after the price list moves on.
     product_price_id: Mapped[int | None] = mapped_column(ForeignKey("product_prices.id"))
+
+    #: Included, Optional or Recommended. Only INCLUDED counts toward the
+    #: quotation total; the other two are offered to the customer and cost
+    #: nothing until they select them. Defaults to INCLUDED so every line
+    #: raised before the customer portal existed behaves exactly as before.
+    inclusion: Mapped[ItemInclusion] = mapped_column(
+        _enum(ItemInclusion), nullable=False, default=ItemInclusion.INCLUDED,
+        server_default=ItemInclusion.INCLUDED.value,
+    )
 
     is_custom_product: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     custom_description: Mapped[str | None] = mapped_column(Text)
@@ -1058,6 +1089,158 @@ class CustomerResponseLog(Base, TimestampMixin):
     created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
 
     quotation: Mapped[Quotation] = relationship(back_populates="response_logs")
+
+
+class QuoteAccessToken(Base, TimestampMixin):
+    """A customer's way in to one quotation, and nothing else.
+
+    **The token itself is never stored.** Only its SHA-256 hash is, so a leaked
+    database dump does not hand out working links. The plaintext is returned
+    once, at issue, and cannot be recovered afterwards — reissue instead.
+
+    Scoped to a single quotation by construction: the lookup is
+    hash -> token -> quotation, so there is no identifier a customer could edit
+    to reach someone else's quote.
+    """
+
+    __tablename__ = "quote_access_tokens"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    quotation_id: Mapped[int] = mapped_column(
+        ForeignKey("quotations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    #: SHA-256 of the plaintext token, hex encoded.
+    token_hash: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True, index=True
+    )
+    expires_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    first_viewed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    last_viewed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    view_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+
+    created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+
+    quotation: Mapped[Quotation] = relationship(back_populates="access_tokens")
+
+    def is_usable(self, now: dt.datetime | None = None) -> bool:
+        """Live, not revoked, not expired."""
+        now = now or dt.datetime.now(dt.UTC)
+        if self.revoked_at is not None:
+            return False
+        if self.expires_at is not None:
+            expires = self.expires_at
+            if expires.tzinfo is None:      # SQLite hands back naive datetimes
+                expires = expires.replace(tzinfo=dt.UTC)
+            if expires <= now:
+                return False
+        return True
+
+
+class QuoteEvent(Base):
+    """Something that happened to a quotation's public link.
+
+    Deliberately holds no IP address, user agent or other identifier: the
+    business question is "was it opened, and when", which a timestamp answers.
+    Collecting more would be personal data the company has no use for.
+    """
+
+    __tablename__ = "quote_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    quotation_id: Mapped[int] = mapped_column(
+        ForeignKey("quotations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    access_token_id: Mapped[int | None] = mapped_column(
+        ForeignKey("quote_access_tokens.id", ondelete="SET NULL"), index=True
+    )
+    event_type: Mapped[QuoteEventType] = mapped_column(
+        _enum(QuoteEventType), nullable=False, index=True
+    )
+    occurred_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.UTC)
+    )
+    #: Small, non-identifying context — revision number, reason for a denial.
+    detail_json: Mapped[Any | None] = mapped_column(JSONType)
+
+    quotation: Mapped[Quotation] = relationship(back_populates="quote_events")
+
+    __table_args__ = (
+        Index("ix_quote_events_quotation_type", "quotation_id", "event_type"),
+    )
+
+
+class PortalResponse(Base):
+    """What the customer submitted, and the totals they were shown when they did.
+
+    The money columns are a **snapshot taken server-side at submission**, not
+    figures posted by the browser. They exist so that "what did they actually
+    agree to" survives any later revision of the quotation.
+    """
+
+    __tablename__ = "portal_responses"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    quotation_id: Mapped[int] = mapped_column(
+        ForeignKey("quotations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    access_token_id: Mapped[int | None] = mapped_column(
+        ForeignKey("quote_access_tokens.id", ondelete="SET NULL")
+    )
+    #: The revision the customer was looking at, so a later revision cannot be
+    #: mistaken for the one they accepted.
+    revision_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    response_type: Mapped[PortalResponseType] = mapped_column(
+        _enum(PortalResponseType), nullable=False, index=True
+    )
+
+    customer_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    job_title: Mapped[str | None] = mapped_column(String(120))
+    customer_email: Mapped[str | None] = mapped_column(String(255))
+    comment: Mapped[str | None] = mapped_column(Text)
+
+    #: Typed signature. Kept distinct from customer_name: a person may sign in
+    #: a different form from the name they entered, and both are evidence.
+    signature_name: Mapped[str | None] = mapped_column(String(160))
+    accepted_terms: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
+
+    #: QuotationItem ids the customer chose to add. Included lines are not
+    #: listed — they were never optional.
+    selected_item_ids: Mapped[Any | None] = mapped_column(JSONType)
+
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
+    subtotal: Mapped[Decimal] = mapped_column(money(), nullable=False, default=Decimal("0"))
+    tax_amount: Mapped[Decimal] = mapped_column(money(), nullable=False, default=Decimal("0"))
+    grand_total: Mapped[Decimal] = mapped_column(money(), nullable=False, default=Decimal("0"))
+
+    attachment_key: Mapped[str | None] = mapped_column(String(500))
+    #: One-time value carried by the submitted form. Unique, so a replayed POST
+    #: violates the constraint instead of recording a second response.
+    submission_nonce: Mapped[str | None] = mapped_column(String(64), unique=True)
+    submitted_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.UTC)
+    )
+
+    quotation: Mapped[Quotation] = relationship(back_populates="portal_responses")
+
+    __table_args__ = (
+        # Exactly one acceptance per revision, enforced by the database rather
+        # than by a check-then-write in the service: two simultaneous approvals
+        # race, and only one can commit.
+        Index(
+            "uq_portal_responses_one_approval_per_revision",
+            "quotation_id", "revision_no",
+            unique=True,
+            sqlite_where=text("response_type = 'APPROVED'"),
+            postgresql_where=text("response_type = 'APPROVED'"),
+        ),
+    )
 
 
 class Attachment(Base):

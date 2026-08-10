@@ -583,6 +583,61 @@ class AddressType(StrEnum):
     SHIPPING = "SHIPPING"
 
 
+class ItemInclusion(StrEnum):
+    """Whether a quotation line is part of the price, or offered alongside it.
+
+    ``INCLUDED`` is the default and the only value existing rows carry, so the
+    behaviour of every quotation raised before the customer portal existed is
+    unchanged: everything counts toward the total.
+
+    ``OPTIONAL`` and ``RECOMMENDED`` differ only in how they are presented —
+    both are excluded from the total until the customer selects them, and
+    neither is recorded as accepted until a response is submitted.
+    """
+
+    INCLUDED = "INCLUDED"
+    OPTIONAL = "OPTIONAL"
+    RECOMMENDED = "RECOMMENDED"
+
+
+#: Lines the customer may choose. Everything else is part of the offer.
+SELECTABLE_INCLUSIONS: frozenset[ItemInclusion] = frozenset({
+    ItemInclusion.OPTIONAL,
+    ItemInclusion.RECOMMENDED,
+})
+
+INCLUSION_DISPLAY_NAMES: dict[ItemInclusion, str] = {
+    ItemInclusion.INCLUDED: "Included",
+    ItemInclusion.OPTIONAL: "Optional",
+    ItemInclusion.RECOMMENDED: "Recommended",
+}
+
+
+class QuoteEventType(StrEnum):
+    """What happened to a quotation's public link.
+
+    Kept separate from ``QuotationStatus``: the internal lifecycle is a state
+    machine with a transition table, while these are facts that accumulate.
+    Recording "viewed" as a status would mean editing STATUS_TRANSITIONS and
+    destabilising the approval workflow for something that is only a timestamp.
+    """
+
+    LINK_ISSUED = "LINK_ISSUED"
+    LINK_REVOKED = "LINK_REVOKED"
+    VIEWED = "VIEWED"
+    PDF_DOWNLOADED = "PDF_DOWNLOADED"
+    APPROVED = "APPROVED"
+    CHANGES_REQUESTED = "CHANGES_REQUESTED"
+    ACCESS_DENIED = "ACCESS_DENIED"
+
+
+class PortalResponseType(StrEnum):
+    """What the customer submitted through the portal."""
+
+    APPROVED = "APPROVED"
+    CHANGES_REQUESTED = "CHANGES_REQUESTED"
+
+
 class SendMethod(StrEnum):
     EMAIL = "EMAIL"
     COURIER = "COURIER"
@@ -645,6 +700,10 @@ class AuditAction(StrEnum):
     REJECTED = "REJECTED"
     WARNING_OVERRIDDEN = "WARNING_OVERRIDDEN"
     PDF_GENERATED = "PDF_GENERATED"
+    QUOTE_LINK_ISSUED = "QUOTE_LINK_ISSUED"
+    QUOTE_LINK_REVOKED = "QUOTE_LINK_REVOKED"
+    CUSTOMER_APPROVED = "CUSTOMER_APPROVED"
+    CUSTOMER_REQUESTED_CHANGES = "CUSTOMER_REQUESTED_CHANGES"
     STATUS_CHANGED = "STATUS_CHANGED"
     REVISION_CREATED = "REVISION_CREATED"
     CUSTOMER_RESPONSE_LOGGED = "CUSTOMER_RESPONSE_LOGGED"
