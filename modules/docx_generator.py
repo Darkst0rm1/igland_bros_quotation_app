@@ -246,10 +246,24 @@ def _write_totals(doc: Document, model: QuotationDocument) -> None:
     for total in model.totals:
         row = table.add_row()
         _keep_row_together(row)
-        _para(row.cells[0], total.label, size=9, bold=total.emphasis,
-              align=WD_ALIGN_PARAGRAPH.RIGHT, space_after=0)
-        _para(row.cells[1], total.amount, size=9, bold=total.emphasis,
-              align=WD_ALIGN_PARAGRAPH.RIGHT, space_after=0)
+        # The grand total gets the banded, large-type treatment the PDF gives
+        # it. Both renderers read from the same model, so letting them diverge
+        # visually would mean the customer sees a different document depending
+        # on which format the employee happened to download.
+        _para(
+            row.cells[0],
+            total.label.upper() if total.emphasis else total.label,
+            size=9, bold=total.emphasis,
+            align=WD_ALIGN_PARAGRAPH.RIGHT, space_after=0,
+        )
+        _para(
+            row.cells[1], total.amount,
+            size=14 if total.emphasis else 9, bold=total.emphasis,
+            align=WD_ALIGN_PARAGRAPH.RIGHT, space_after=0,
+        )
+        if total.emphasis:
+            for cell in row.cells:
+                _shade(cell, "EEF1F5")
     _para(doc, "", size=4)
 
 

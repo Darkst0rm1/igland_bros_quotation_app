@@ -45,6 +45,20 @@ BAND = colors.HexColor("#eef1f5")
 
 PAGE_SIZES = {"A4": A4, "LETTER": LETTER}
 
+#: Relative column widths for the line table. Anything not listed gets 1.0.
+COLUMN_WEIGHTS = {
+    "description": 2.9,
+    "spec": 1.6,
+    "item": 0.8,
+    "size": 1.0,
+    "pack_size": 1.2,
+    "quantity_packs": 0.95,
+    "quantity_pieces": 0.95,
+    "price_per_pack": 1.05,
+    "price_per_piece": 1.05,
+    "line_total": 1.35,
+}
+
 
 def _styles() -> dict[str, ParagraphStyle]:
     base = getSampleStyleSheet()
@@ -73,23 +87,42 @@ def _styles() -> dict[str, ParagraphStyle]:
             "body", parent=base["Normal"], fontSize=9, leading=12, textColor=INK,
         ),
         "cell": ParagraphStyle(
-            "cell", parent=base["Normal"], fontSize=8, leading=10.5, textColor=INK,
+            "cell", parent=base["Normal"], fontSize=8.8, leading=12, textColor=INK,
         ),
         "cell_right": ParagraphStyle(
-            "cell_right", parent=base["Normal"], fontSize=8, leading=10.5,
+            "cell_right", parent=base["Normal"], fontSize=8.8, leading=12,
             alignment=TA_RIGHT, textColor=INK,
         ),
         "head": ParagraphStyle(
             "head", parent=base["Normal"], fontSize=7.5, leading=10,
-            textColor=INK, fontName="Helvetica-Bold",
+            textColor=MUTED, fontName="Helvetica-Bold",
         ),
         "head_right": ParagraphStyle(
             "head_right", parent=base["Normal"], fontSize=7.5, leading=10,
-            alignment=TA_RIGHT, textColor=INK, fontName="Helvetica-Bold",
+            alignment=TA_RIGHT, textColor=MUTED, fontName="Helvetica-Bold",
         ),
         "section": ParagraphStyle(
             "section", parent=base["Normal"], fontSize=10, leading=13,
             textColor=INK, fontName="Helvetica-Bold", spaceBefore=8, spaceAfter=4,
+        ),
+        # The money block. Subtotal rows stay quiet so the grand total, which
+        # is the number the customer is actually being asked about, carries the
+        # emphasis on its own.
+        "total_label": ParagraphStyle(
+            "total_label", parent=base["Normal"], fontSize=9, leading=12,
+            textColor=MUTED,
+        ),
+        "total_value": ParagraphStyle(
+            "total_value", parent=base["Normal"], fontSize=9, leading=12,
+            alignment=TA_RIGHT, textColor=INK,
+        ),
+        "grand_label": ParagraphStyle(
+            "grand_label", parent=base["Normal"], fontSize=8.5, leading=12,
+            textColor=MUTED, fontName="Helvetica-Bold",
+        ),
+        "grand_value": ParagraphStyle(
+            "grand_value", parent=base["Title"], fontSize=16, leading=19,
+            alignment=TA_RIGHT, textColor=INK,
         ),
         "term": ParagraphStyle(
             "term", parent=base["Normal"], fontSize=8.5, leading=11.5, textColor=INK,
@@ -307,11 +340,10 @@ def _line_table(model: QuotationDocument, styles, width: float):  # noqa: ANN001
         for line in model.lines
     ]
 
-    # Description gets the slack; everything else shares what is left.
-    weights = [
-        3.2 if key == "description" else 1.6 if key == "spec" else 1.0
-        for key in model.columns
-    ]
+    # Description gets the slack; everything else shares what is left. Money
+    # columns are given extra over the 1.0 default because a wrapped figure
+    # ("$13,545.0" above "0") reads as a different number at a glance.
+    weights = [COLUMN_WEIGHTS.get(key, 1.0) for key in model.columns]
     total_weight = sum(weights) or 1
     col_widths = [width * w / total_weight for w in weights]
 
@@ -327,10 +359,10 @@ def _line_table(model: QuotationDocument, styles, width: float):  # noqa: ANN001
             ("LINEBELOW", (0, 0), (-1, 0), 0.6, RULE),
             ("LINEBELOW", (0, 1), (-1, -1), 0.25, RULE),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("TOPPADDING", (0, 0), (-1, -1), 5),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-            ("LEFTPADDING", (0, 0), (-1, -1), 5),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ("LEFTPADDING", (0, 0), (-1, -1), 7),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 7),
         ])
     )
     return table
@@ -370,10 +402,10 @@ def _shipping_flowables(model: QuotationDocument, styles, width: float) -> list:
             ("LINEBELOW", (0, 0), (-1, 0), 0.6, RULE),
             ("LINEBELOW", (0, 1), (-1, -1), 0.25, RULE),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("TOPPADDING", (0, 0), (-1, -1), 5),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-            ("LEFTPADDING", (0, 0), (-1, -1), 5),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ("LEFTPADDING", (0, 0), (-1, -1), 7),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 7),
         ])
     )
 
@@ -398,30 +430,77 @@ def _shipping_flowables(model: QuotationDocument, styles, width: float) -> list:
 
 
 def _totals_table(model: QuotationDocument, styles, width: float):  # noqa: ANN001
-    rows = []
-    for total in model.totals:
-        label_style = styles["head"] if total.emphasis else styles["cell"]
-        value_style = styles["head_right"] if total.emphasis else styles["cell_right"]
-        rows.append([
-            Paragraph(_escape(total.label), label_style),
-            Paragraph(_escape(total.amount), value_style),
-        ])
+    """The money block, right-aligned, with the grand total carrying the weight.
 
-    table = Table(rows, colWidths=[width * 0.62, width * 0.38])
-    style = [
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-    ]
-    if rows:
-        style += [
-            ("LINEABOVE", (0, len(rows) - 1), (-1, len(rows) - 1), 0.8, INK),
-            ("TOPPADDING", (0, len(rows) - 1), (-1, len(rows) - 1), 6),
+    ``block`` is the width this actually occupies, and every column inside is a
+    fraction of ``block`` — never of ``width``. Sizing the inner columns against
+    the full page width makes them overflow the wrapper cell, and ReportLab
+    pushes the amount column past the right margin: the labels print, the
+    figures do not. ``extract_text`` still finds the numbers in the content
+    stream, so a text-presence test cannot catch it.
+    """
+    block = width * 0.52
+    quiet = [t for t in model.totals if not t.emphasis]
+    grand = [t for t in model.totals if t.emphasis]
+
+    stacked: list = []
+
+    if quiet:
+        quiet_rows = [
+            [
+                Paragraph(_escape(t.label), styles["total_label"]),
+                Paragraph(_escape(t.amount), styles["total_value"]),
+            ]
+            for t in quiet
         ]
-    table.setStyle(TableStyle(style))
+        quiet_table = Table(quiet_rows, colWidths=[block * 0.58, block * 0.42])
+        quiet_table.setStyle(
+            TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("LINEBELOW", (0, 0), (-1, -2), 0.25, RULE),
+            ])
+        )
+        stacked.append(quiet_table)
 
-    wrapper = Table([["", table]], colWidths=[width * 0.5, width * 0.5])
+    for total in grand:
+        grand_table = Table(
+            [[
+                Paragraph(_escape(total.label.upper()), styles["grand_label"]),
+                Paragraph(_escape(total.amount), styles["grand_value"]),
+            ]],
+            colWidths=[block * 0.42, block * 0.58],
+        )
+        grand_table.setStyle(
+            TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), BAND),
+                ("LINEABOVE", (0, 0), (-1, 0), 1.0, INK),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("TOPPADDING", (0, 0), (-1, -1), 9),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ])
+        )
+        stacked.append(grand_table)
+
+    if not stacked:
+        return Spacer(1, 0)
+
+    inner = Table([[flowable] for flowable in stacked], colWidths=[block])
+    inner.setStyle(
+        TableStyle([
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ])
+    )
+
+    wrapper = Table([["", inner]], colWidths=[width - block, block])
     wrapper.setStyle(
         TableStyle([
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
