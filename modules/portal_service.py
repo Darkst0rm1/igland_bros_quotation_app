@@ -124,7 +124,9 @@ def issue_token(
     issuing a new link, which is the intended trade: a database disclosure
     hands out no working URLs.
     """
-    require(user, Perm.QUOTE_GENERATE_PDF)
+    # Publishing to a customer is its own act, not a consequence of being able
+    # to produce a PDF or edit a price.
+    require(user, Perm.QUOTE_PORTAL_LINK_ISSUE)
     now = now or dt.datetime.now(dt.UTC)
 
     raw = secrets.token_urlsafe(TOKEN_BYTES)
@@ -148,7 +150,7 @@ def issue_token(
 
 def revoke_token(session: Session, user: AuthUser, token: QuoteAccessToken) -> None:
     """Kill a link immediately. Idempotent."""
-    require(user, Perm.QUOTE_GENERATE_PDF)
+    require(user, Perm.QUOTE_PORTAL_LINK_REVOKE)
     if token.revoked_at is not None:
         return
     token.revoked_at = dt.datetime.now(dt.UTC)

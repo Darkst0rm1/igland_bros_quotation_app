@@ -257,6 +257,7 @@ PAGE_SPECS: dict[str, list[tuple[str, str, str, Perm | None]]] = {
         ("pages/02_Create_Quotation.py", "Create Quotation", ":material/note_add:", Perm.QUOTE_CREATE),
         ("pages/03_Quotation_History.py", "Quotation History", ":material/history:", Perm.QUOTE_VIEW_OWN),
         ("pages/04_Approval_Queue.py", "Approval Queue", ":material/task_alt:", Perm.QUOTE_APPROVE),
+        ("pages/12_Customer_Portal.py", "Customer Portal", ":material/link:", Perm.QUOTE_PORTAL_PREVIEW),
     ],
     "Master data": [
         ("pages/05_Customers.py", "Customers", ":material/apartment:", Perm.CUSTOMER_VIEW),

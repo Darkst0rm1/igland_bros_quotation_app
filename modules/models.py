@@ -1243,6 +1243,36 @@ class PortalResponse(Base):
     )
 
 
+class StorageCleanup(Base):
+    """An object that should be deleted, once the database says it is safe to.
+
+    Exists because deleting a storage object and committing a database change
+    are two systems that cannot be made atomic. The order that survives failure
+    is: write the new reference, commit it, *then* retire the old object — and
+    if that last step fails, the object must not be forgotten.
+
+    A row here means "the database no longer references this key". Deletion is
+    retried later; repeating it is harmless because removing an object that is
+    already gone succeeds.
+    """
+
+    __tablename__ = "storage_cleanups"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: Unique, so queueing the same key twice cannot create duplicate work.
+    storage_key: Mapped[str] = mapped_column(String(500), nullable=False, unique=True)
+    reason: Mapped[str | None] = mapped_column(String(120))
+    attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        default=lambda: dt.datetime.now(dt.UTC),
+    )
+    last_attempt_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class Attachment(Base):
     """Polymorphic file reference.
 
