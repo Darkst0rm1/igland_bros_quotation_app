@@ -118,6 +118,22 @@ class Settings(BaseSettings):
     storage_access_key_id: str = ""
     storage_secret_access_key: str = ""
 
+    # --- Customer portal (the separate public service) ---------------------
+    #: Public base URL the customer's link points at, e.g.
+    #: https://quotes.iglandbros.com. Used to build links and to validate the
+    #: Origin of state-changing requests. Never hardcoded anywhere.
+    portal_base_url: str = ""
+    #: Shown on the portal's "link not available" page so a customer who
+    #: hits an expired link knows who to contact. Optional.
+    portal_support_email: str = ""
+    #: How long a customer link stays live when the quotation carries no
+    #: validity date of its own.
+    portal_link_days: int = Field(default=30, ge=1, le=365)
+    #: Fixed-window rate limits. Generous enough that a customer refreshing or
+    #: sharing the link with a colleague is never affected.
+    portal_view_rate_per_minute: int = Field(default=60, ge=1, le=1000)
+    portal_submit_rate_per_hour: int = Field(default=10, ge=1, le=200)
+
     # --- Uploads ----------------------------------------------------------
     max_upload_mb: int = Field(default=10, ge=1, le=100)
     allowed_upload_extensions: str = ".xlsx,.xls,.png,.jpg,.jpeg,.pdf"

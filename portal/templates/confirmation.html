@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}{{ heading }}{% endblock %}
+{% block body %}
+<main id="main" class="centred">
+  <div class="card notice">
+    <p class="tick" aria-hidden="true">&#10003;</p>
+    <h1>{{ heading }}</h1>
+    <p>{{ message }}</p>
+    <dl class="confirm-detail">
+      <dt>Quotation</dt><dd>{{ reference }}</dd>
+      {% if total is not none %}
+      <dt>Accepted total</dt><dd class="strong">{{ total | money(currency) }}</dd>
+      {% endif %}
+    </dl>
+    <p class="muted">You may close this page. A copy has been recorded against
+       your quotation.</p>
+  </div>
+</main>
+{% endblock %}

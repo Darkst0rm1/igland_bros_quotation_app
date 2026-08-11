@@ -1,0 +1,254 @@
+/*
+ * Customer quotation portal.
+ *
+ * Served from this service — no font host, no CDN, no external stylesheet, so
+ * the Content-Security-Policy can stay at 'self' and a customer opening their
+ * quotation is not disclosed to a third party.
+ *
+ * Structure first. The tokens in :root are deliberately neutral placeholders;
+ * Igland Bros branding lands in the next phase by editing this block alone.
+ */
+
+:root {
+  --ink: #14212b;
+  --ink-soft: #46586a;
+  --muted: #6b7c8c;
+  --rule: #dde3e8;
+  --canvas: #f5f7f9;
+  --surface: #ffffff;
+  --accent: #1f7a3d;          /* approve */
+  --accent-ink: #ffffff;
+  --warn-bg: #fff6e5;
+  --warn-ink: #7a5200;
+  --ok-bg: #eaf6ee;
+  --ok-ink: #1c5c31;
+  --alert-bg: #fdeceb;
+  --alert-ink: #8d2018;
+
+  --radius: 10px;
+  --gap: 24px;
+  --shadow: 0 1px 2px rgba(20, 33, 43, .06), 0 8px 24px rgba(20, 33, 43, .06);
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: var(--font);
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--ink);
+  background: var(--canvas);
+  -webkit-text-size-adjust: 100%;
+}
+
+h1, h2, h3 { line-height: 1.25; color: var(--ink); }
+h2 { font-size: 1.05rem; margin: 0 0 12px; }
+h3 { font-size: .95rem; margin: 16px 0 4px; }
+a { color: #12507f; }
+
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.skip-link {
+  position: absolute; left: -999px; top: 0; background: var(--surface);
+  padding: 10px 16px; z-index: 10;
+}
+.skip-link:focus { left: 8px; top: 8px; }
+
+/* Visible focus everywhere: the portal is keyboard-navigable end to end. */
+a:focus-visible, button:focus-visible, input:focus-visible,
+textarea:focus-visible, summary:focus-visible {
+  outline: 3px solid #2b7cd3; outline-offset: 2px;
+}
+
+/* ---------------------------------------------------------------- layout - */
+
+.layout {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr) 320px;
+  grid-template-areas: "brand document summary";
+  gap: var(--gap);
+  max-width: 1360px;
+  margin: 0 auto;
+  padding: var(--gap);
+  align-items: start;
+}
+
+.brand { grid-area: brand; position: sticky; top: var(--gap); }
+.document { grid-area: document; min-width: 0; }
+.summary { grid-area: summary; position: sticky; top: var(--gap); }
+
+.brand-mark { font-weight: 700; font-size: 1.15rem; letter-spacing: -.01em; }
+.brand-detail {
+  font-style: normal; font-size: .82rem; color: var(--muted); margin-top: 10px;
+}
+
+.document, .summary-card, .card {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.document { padding: 28px; }
+
+/* ------------------------------------------------------------- head block - */
+
+.head { display: flex; flex-wrap: wrap; gap: var(--gap); margin-bottom: 24px; }
+.head-block { flex: 1 1 220px; min-width: 0; }
+.label {
+  font-size: .72rem; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--muted); margin: 10px 0 2px;
+}
+.value { margin: 0; }
+.strong { font-weight: 700; }
+.muted { color: var(--muted); }
+.small { font-size: .85rem; }
+.pre { white-space: pre-wrap; }
+
+/* ----------------------------------------------------------------- table - */
+
+.lines { width: 100%; border-collapse: collapse; margin-top: 8px; }
+.lines caption { text-align: left; }
+.lines th {
+  text-align: left; font-size: .78rem; text-transform: uppercase;
+  letter-spacing: .06em; color: var(--muted); font-weight: 700;
+  border-bottom: 1px solid var(--rule); padding: 10px 8px;
+}
+.lines td { padding: 14px 8px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+.lines .num, .lines th.num { text-align: right; white-space: nowrap; }
+.lines .pick { width: 34px; }
+.line-name { display: block; font-weight: 600; }
+.line-spec { display: block; font-size: .85rem; color: var(--muted); }
+tr.not-included td { opacity: .62; }
+
+.pill {
+  display: inline-block; margin-top: 6px; padding: 2px 8px; border-radius: 999px;
+  font-size: .72rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .05em; background: var(--canvas); color: var(--ink-soft);
+  border: 1px solid var(--rule);
+}
+.pill.recommended { background: var(--ok-bg); color: var(--ok-ink); border-color: transparent; }
+
+.recalc { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
+
+/* ---------------------------------------------------------------- panels - */
+
+.panel { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--rule); }
+.grid-detail {
+  display: grid; grid-template-columns: max-content 1fr; gap: 4px 20px; margin: 0;
+}
+.grid-detail dt { color: var(--muted); }
+.grid-detail dd { margin: 0; }
+
+.banner {
+  display: flex; flex-direction: column; gap: 2px; padding: 14px 16px;
+  border-radius: var(--radius); margin-bottom: 20px;
+}
+.banner.accepted { background: var(--ok-bg); color: var(--ok-ink); }
+.banner.expired { background: var(--warn-bg); color: var(--warn-ink); }
+.alert {
+  background: var(--alert-bg); color: var(--alert-ink); padding: 12px 16px;
+  border-radius: var(--radius); margin: 0 0 20px;
+}
+
+/* --------------------------------------------------------------- summary - */
+
+.summary-card { padding: 22px; }
+.total { font-size: 2rem; font-weight: 800; margin: 2px 0 16px; letter-spacing: -.02em; }
+.breakdown {
+  display: grid; grid-template-columns: 1fr max-content; gap: 6px 14px;
+  margin: 0 0 16px; font-size: .9rem;
+}
+.breakdown dt { color: var(--muted); }
+.breakdown dd { margin: 0; text-align: right; }
+.deposit { font-size: .9rem; padding-top: 12px; border-top: 1px solid var(--rule); }
+
+/* ----------------------------------------------------------------- forms - */
+
+.btn {
+  display: inline-block; text-align: center; text-decoration: none;
+  padding: 11px 18px; border-radius: 8px; font-size: .95rem; font-weight: 700;
+  border: 1px solid transparent; cursor: pointer;
+}
+.btn.wide { display: block; width: 100%; margin-top: 10px; }
+.btn.primary { background: var(--accent); color: var(--accent-ink); }
+.btn.secondary { background: var(--surface); color: var(--ink); border-color: var(--rule); }
+
+.respond { border: 1px solid var(--rule); border-radius: var(--radius); margin-top: 12px; }
+.respond-summary { padding: 14px 16px; font-weight: 700; cursor: pointer; }
+.respond-form { padding: 0 16px 18px; }
+.confirm-total {
+  background: var(--canvas); padding: 12px 14px; border-radius: 8px; margin: 0 0 16px;
+}
+
+.field { margin-bottom: 14px; }
+.field label { display: block; font-size: .85rem; color: var(--ink-soft); margin-bottom: 4px; }
+.field input, .field textarea {
+  width: 100%; padding: 10px 12px; font: inherit; color: var(--ink);
+  border: 1px solid var(--rule); border-radius: 8px; background: var(--surface);
+}
+.field.check { display: flex; gap: 10px; align-items: flex-start; }
+.field.check label { margin: 0; }
+.field.check input { width: auto; margin-top: 3px; }
+.signature { font-family: "Segoe Script", "Brush Script MT", cursive; font-size: 1.15rem; }
+
+/* ------------------------------------------------------- notices / mobile - */
+
+.centred { max-width: 560px; margin: 12vh auto; padding: 0 20px; }
+.card.notice { padding: 32px; text-align: center; }
+.tick { font-size: 2rem; color: var(--accent); margin: 0 0 4px; }
+.confirm-detail {
+  display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px;
+  text-align: left; margin: 20px auto; width: fit-content;
+}
+.confirm-detail dt { color: var(--muted); }
+.confirm-detail dd { margin: 0; }
+
+.mobile-bar { display: none; }
+
+@media (max-width: 1080px) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "brand" "summary" "document";
+  }
+  .brand, .summary { position: static; }
+}
+
+@media (max-width: 720px) {
+  body { font-size: 16px; }
+  .layout { padding: 16px; gap: 16px; padding-bottom: 88px; }
+  .document { padding: 18px; }
+
+  /* Tables become stacked records: a horizontal scroll on a quotation is a
+     good way to have the customer miss a line. */
+  .lines thead { display: none; }
+  .lines, .lines tbody, .lines tr, .lines td { display: block; width: 100%; }
+  .lines tr { padding: 14px 0; border-bottom: 1px solid var(--rule); }
+  .lines td { border: 0; padding: 2px 0; }
+  .lines td.num { text-align: left; }
+  .lines td[data-label]::before {
+    content: attr(data-label) ": ";
+    color: var(--muted); font-size: .82rem;
+  }
+  .lines td.pick { padding-bottom: 8px; }
+  .lines td.pick::before { content: none; }
+
+  .mobile-bar {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 5;
+    padding: 12px 16px; background: var(--surface);
+    border-top: 1px solid var(--rule);
+    box-shadow: 0 -4px 16px rgba(20, 33, 43, .08);
+    padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  }
+  .mobile-total { font-weight: 800; font-size: 1.1rem; }
+}
+
+@media print {
+  .summary, .mobile-bar, .respond, .recalc, .skip-link { display: none; }
+  body { background: #fff; }
+  .document { border: 0; box-shadow: none; padding: 0; }
+}
