@@ -20,6 +20,8 @@ import streamlit as st
 from modules import (
     approval_service,
     document_service,
+    portal_readiness,
+    portal_service,
     pricing_service,
     quotation_service,
     revision_service,
@@ -66,6 +68,7 @@ from modules.session import page_header, require_page
 from modules.utilities import (
     escape_markdown,
     format_date,
+    format_datetime,
     format_money,
     format_pack_price,
     format_quantity,
@@ -1612,6 +1615,91 @@ with review_tab:
                         file_name=again.filename,
                         mime=again.mime_type,
                     )
+
+    # ----------------------------------------------------------------- #
+    # Customer portal — summary only
+    # ----------------------------------------------------------------- #
+    # A compact read-only status here for discoverability; issuing, revoking
+    # and editing live on the dedicated Customer Portal page. Read-only is also
+    # what keeps this safe: this page holds unsaved edits in widgets, and a
+    # portal control acting on them would publish a quotation that differs from
+    # what is stored.
+    if user.has(Perm.QUOTE_PORTAL_PREVIEW):
+        st.divider()
+        st.markdown("##### Customer portal")
+
+        with session_scope() as db:
+            quote = db.get(Quotation, quotation_id)
+            readiness = portal_readiness.check(db, quote)
+            live_links = portal_service.active_tokens(db, quotation_id)
+            selectable = portal_service.selectable_items(quote)
+            latest_response = (
+                sorted(quote.portal_responses, key=lambda r: r.submitted_at)[-1]
+                if quote.portal_responses else None
+            )
+            portal_summary = {
+                "status": STATUS_DISPLAY_NAMES.get(quote.status, str(quote.status)),
+                "deposit_pct": quote.deposit_pct,
+                "optional_count": len(selectable),
+                "item_count": len(quote.items),
+                "link_expiry": (
+                    format_datetime(live_links[0].expires_at) if live_links else ""
+                ),
+                "link_views": live_links[0].view_count if live_links else 0,
+                "outstanding": len(readiness.outstanding),
+                "may_issue": readiness.may_issue_link,
+                "response": (
+                    latest_response.response_type.value.replace("_", " ").title()
+                    if latest_response else ""
+                ),
+            }
+
+        col_status, col_config, col_link = st.columns(3)
+        with col_status:
+            st.caption("Quotation status")
+            st.markdown(f"**{portal_summary['status']}**")
+            if portal_summary["response"]:
+                st.caption("Customer response")
+                st.markdown(f"**{portal_summary['response']}**")
+        with col_config:
+            st.caption("Offered items")
+            st.markdown(
+                f"**{portal_summary['optional_count']} optional** of "
+                f"{portal_summary['item_count']}"
+            )
+            st.caption("Deposit")
+            st.markdown(f"**{portal_summary['deposit_pct']:g}%**")
+        with col_link:
+            st.caption("Customer link")
+            if live_links:
+                st.markdown("**Active**")
+                st.caption(
+                    f"Expires {portal_summary['link_expiry']} · "
+                    f"{portal_summary['link_views']} view(s)"
+                )
+            else:
+                st.markdown("**None issued**")
+
+        if portal_summary["outstanding"]:
+            message = (
+                f"{portal_summary['outstanding']} readiness item(s) outstanding."
+            )
+            if portal_summary["may_issue"]:
+                st.warning(message + " Publishing is still allowed here.")
+            else:
+                st.error(message + " Publishing is blocked until these are complete.")
+        else:
+            st.success("Company details are complete.")
+
+        # No plaintext token is shown: only its hash is stored, so a link issued
+        # earlier cannot be redisplayed by this page or any other.
+        st.caption(
+            "Issuing, revoking and editing which items are optional live on the "
+            "Customer Portal page. A link is shown once, when it is created."
+        )
+        if st.button("Manage Customer Portal", key="goto_portal"):
+            st.session_state["portal_quote"] = {"id": quotation_id}
+            st.switch_page("pages/12_Customer_Portal.py")
 
     if header["is_locked"]:
         st.divider()

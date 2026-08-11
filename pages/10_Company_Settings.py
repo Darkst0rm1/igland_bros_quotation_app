@@ -8,11 +8,12 @@ than printed as a placeholder.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 from decimal import Decimal
 
 import streamlit as st
 
-from modules import settings_service, shipping_service
+from modules import logo_service, settings_service, shipping_service
 from modules.audit_service import record_audit
 from modules.authorization import PermissionDenied
 from modules.constants import (
@@ -33,7 +34,7 @@ from modules.document_model import AVAILABLE_COLUMNS, DEFAULT_COLUMNS
 from modules.numbering import NumberFormatError, render, validate_format
 from modules.session import page_header, require_page
 from modules.shipping_service import ShippingError
-from modules.storage import StorageError, build_key, get_storage, validate_upload
+from modules.storage import StorageError, get_storage
 
 user = require_page(Perm.SETTINGS_MANAGE)
 page_header("Company Settings", "Identity, document defaults and thresholds")
@@ -199,26 +200,91 @@ with identity_tab:
     st.divider()
     st.markdown("##### Logo")
     st.caption(
-        "Optional. Without one the document header is typographic — a deliberate "
-        "design, not a degraded one."
+        "Shown on the customer quotation page and required before a quotation "
+        "can be published in production. Without one the document header is "
+        "typographic — a deliberate design, not a degraded one."
     )
-    if current["logo_key"]:
-        try:
-            st.image(get_storage().get(current["logo_key"]), width=220)
-        except StorageError:
-            st.warning("The stored logo could not be read.")
 
-    uploaded_logo = st.file_uploader("Upload a logo", type=["png", "jpg", "jpeg"])
-    if uploaded_logo is not None and st.button("Save logo"):
-        data = uploaded_logo.getvalue()
+    has_logo = bool(current["logo_key"])
+    if has_logo:
+        preview_col, meta_col = st.columns([1, 2])
+        with preview_col:
+            try:
+                st.image(get_storage().get(current["logo_key"]), width=220)
+            except StorageError:
+                st.warning("The stored logo could not be read.")
+        with meta_col:
+            st.caption("Current logo. Uploading a replacement needs confirmation below.")
+
+    uploaded_logo = st.file_uploader(
+        "Choose a logo", type=["png", "jpg", "jpeg", "webp"], key="logo_upload",
+        # Streamlit prints its own global limit under the control ("200MB per
+        # file"), which is not this one. State the real bound in the label so an
+        # employee is not told a 150 MB file is too large only after uploading it.
+        help=(
+            f"PNG, JPEG or WebP, up to "
+            f"{logo_service.MAX_UPLOAD_BYTES // 1024 // 1024} MB and "
+            f"{logo_service.MAX_DIMENSION}x{logo_service.MAX_DIMENSION} pixels. "
+            "Re-saved as PNG with metadata removed."
+        ),
+    )
+    st.caption(
+        f"Maximum {logo_service.MAX_UPLOAD_BYTES // 1024 // 1024} MB. The larger "
+        "figure Streamlit prints under the control is its own global upload "
+        "limit, which applies to price-list imports, not to logos."
+    )
+
+    if uploaded_logo is not None:
+        raw = uploaded_logo.getvalue()
+        # Validation lives in logo_service and is not repeated here. This calls
+        # the same prepare() the save path uses, so the preview is exactly what
+        # would be stored — not an optimistic guess that a later save rejects.
         try:
-            safe_name = validate_upload(data, uploaded_logo.name)
-            key = build_key("logos", safe_name)
-            get_storage().put(key, data, uploaded_logo.type)
-        except StorageError as exc:
+            prepared = logo_service.prepare(raw)
+        except logo_service.LogoError as exc:
             st.error(str(exc))
         else:
-            _save(logo_key=key)
+            st.success(
+                f"Ready: {prepared.width}x{prepared.height}, "
+                f"{prepared.size_bytes / 1024:.0f} KB after re-encoding "
+                f"(from {prepared.original_format})."
+            )
+            st.image(prepared.data, width=220, caption="Exactly what will be stored")
+
+            confirmed = True
+            if has_logo:
+                confirmed = st.checkbox(
+                    "Replace the current logo", key="logo_replace_confirm"
+                )
+                if not confirmed:
+                    st.caption("Confirm to enable saving.")
+
+            # A digest of the accepted bytes, so a Streamlit rerun cannot save
+            # the same file twice: the button reappears after the rerun, and
+            # without this a second click would upload a duplicate object.
+            digest = hashlib.sha256(prepared.data).hexdigest()
+            already_saved = st.session_state.get("logo_saved_digest") == digest
+
+            if already_saved:
+                st.info("This logo has been saved. Choose another file to change it.")
+            elif st.button("Save logo", type="primary", disabled=not confirmed):
+                with st.spinner("Storing the logo…"):
+                    try:
+                        with session_scope() as db:
+                            logo_service.save_logo(
+                                db, user, raw, replace_existing=has_logo
+                            )
+                    except PermissionDenied as exc:
+                        st.error(str(exc))
+                    except logo_service.LogoError as exc:
+                        st.error(str(exc))
+                    else:
+                        st.session_state["logo_saved_digest"] = digest
+                        st.session_state.pop("logo_replace_confirm", None)
+                        st.toast("Logo saved", icon="✅")
+                        # Rerun so the readiness panel and the current-logo
+                        # preview both reflect the new state immediately.
+                        st.rerun()
 
 
 # --------------------------------------------------------------------------- #
