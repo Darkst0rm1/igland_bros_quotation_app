@@ -129,6 +129,23 @@ class Settings(BaseSettings):
     #: How long a customer link stays live when the quotation carries no
     #: validity date of its own.
     portal_link_days: int = Field(default=30, ge=1, le=365)
+
+    # --- Portal branding ---------------------------------------------------
+    # Identity — legal name, address, phone, email, logo — always comes from
+    # CompanySettings in the database. These override only how the brand is
+    # *presented*, so the portal is not wired to one company. Blank means "use
+    # the company identity", which is the default.
+    #
+    # Migration path when brand needs to vary per quotation rather than per
+    # deployment: add a nullable ``quotations.brand_code`` and resolve the
+    # profile from it, falling back to these values. No portal code changes
+    # shape; only the lookup gains a row to read.
+    portal_brand_name: str = ""
+    portal_brand_slogan: str = ""
+    portal_brand_legal_footer: str = ""
+    portal_brand_primary: str = ""
+    portal_brand_secondary: str = ""
+    portal_brand_accent: str = ""
     #: Fixed-window rate limits. Generous enough that a customer refreshing or
     #: sharing the link with a colleague is never affected.
     portal_view_rate_per_minute: int = Field(default=60, ge=1, le=1000)

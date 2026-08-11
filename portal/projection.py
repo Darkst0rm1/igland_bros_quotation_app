@@ -122,6 +122,9 @@ class LineView:
     inclusion: str            # INCLUDED / OPTIONAL / RECOMMENDED
     inclusion_label: str
     remarks: str = ""         # customer_remarks only — never internal_remarks
+    #: Whether a photograph exists. The storage key itself is never projected —
+    #: the page asks for the image by opaque line reference instead.
+    has_image: bool = False
 
     @property
     def is_selectable(self) -> bool:
@@ -227,6 +230,8 @@ def _company(settings: CompanySettings | None) -> CompanyView:
 
 
 def _line(item: QuotationItem, token_hash: str, unit_price: Decimal) -> LineView:
+    variant = item.variant
+    has_image = bool(variant and variant.product and variant.product.image_key)
     return LineView(
         ref=line_ref(token_hash, item.id),
         description=(
@@ -246,7 +251,22 @@ def _line(item: QuotationItem, token_hash: str, unit_price: Decimal) -> LineView
         # customer_remarks is written for the customer. internal_remarks is not
         # projected at all — there is no field here to carry it.
         remarks=item.customer_remarks or "",
+        has_image=has_image,
     )
+
+
+def _tax_label(rate: Decimal | None) -> str:
+    """"Tax (13%)", not "Tax (13.000000%)".
+
+    ``:g`` does not strip trailing zeros from a Decimal the way it does from a
+    float — the stored scale is preserved — so normalise first.
+    """
+    if not rate:
+        return "Tax"
+    trimmed = rate.normalize()
+    if trimmed == trimmed.to_integral_value():
+        trimmed = trimmed.quantize(Decimal(1))
+    return f"Tax ({trimmed}%)"
 
 
 def _shipping(quotation: Quotation) -> ShippingView | None:
@@ -369,9 +389,7 @@ def build_quote_view(
             subtotal=totals.subtotal,
             discount=totals.quotation_discount,
             charges=totals.charges_customer_visible,
-            tax_label=(
-                f"Tax ({quotation.tax_rate_pct:g}%)" if quotation.tax_rate_pct else "Tax"
-            ),
+            tax_label=_tax_label(quotation.tax_rate_pct),
             tax_amount=totals.tax_amount,
             grand_total=totals.grand_total,
             deposit_due=deposit_due(quotation, totals),

@@ -14,7 +14,12 @@
 <div class="layout">
 
   <header class="brand" role="banner">
-    <div class="brand-mark">{{ quote.company.name or "Quotation" }}</div>
+    {% if brand.has_logo %}
+      <img class="brand-logo" src="/quote/public/{{ token }}/assets/logo"
+           alt="{{ brand.name }}">
+    {% endif %}
+    <div class="brand-mark">{{ brand.name or quote.company.name or "Quotation" }}</div>
+    {% if brand.slogan %}<p class="brand-slogan">{{ brand.slogan }}</p>{% endif %}
     {% if quote.company.address_lines %}
       <address class="brand-detail">
         {% for line in quote.company.address_lines %}{{ line }}<br>{% endfor %}
@@ -105,6 +110,12 @@
             </td>
             {% endif %}
             <td data-label="Product / Service">
+              <div class="line-body">
+                {% if line.has_image %}
+                  <img class="line-thumb" loading="lazy" alt=""
+                       src="/quote/public/{{ token }}/assets/product/{{ line.ref }}">
+                {% endif %}
+                <div class="line-text">
               <span class="line-name">{{ line.description }}</span>
               {% if line.specification %}<span class="line-spec">{{ line.specification }}</span>{% endif %}
               {% if line.size or line.pack_size %}
@@ -114,6 +125,8 @@
               {% if line.is_selectable %}
                 <span class="pill {{ line.inclusion | lower }}">{{ line.inclusion_label }}</span>
               {% endif %}
+                </div>
+              </div>
             </td>
             <td class="num" data-label="Qty">{{ line.quantity_packs | qty }}</td>
             <td class="num" data-label="Unit price">{{ line.unit_price | money(quote.currency) }}</td>
@@ -276,6 +289,10 @@
       {% endif %}
     </div>
   </aside>
+
+  {% if brand.legal_footer %}
+  <footer class="legal">{{ brand.legal_footer }}</footer>
+  {% endif %}
 
   {% if not quote.is_read_only %}
   <div class="mobile-bar">

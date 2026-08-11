@@ -20,7 +20,7 @@ from decimal import Decimal
 from typing import Annotated
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
@@ -38,7 +38,8 @@ from modules.portal_service import (
     PortalStateError,
 )
 from modules.utilities import format_money
-from portal import projection
+from portal import assets, projection
+from portal.branding import resolve_brand, validate_portal_settings
 from portal.security import (
     RateLimiter,
     SecurityHeadersMiddleware,
@@ -93,6 +94,8 @@ app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="stat
 install_log_redaction()
 
 _settings = get_settings()
+# Refuses to start a production portal without a valid https PORTAL_BASE_URL.
+validate_portal_settings(_settings)
 _view_limiter = RateLimiter(limit=_settings.portal_view_rate_per_minute, window_seconds=60)
 _submit_limiter = RateLimiter(limit=_settings.portal_submit_rate_per_hour, window_seconds=3600)
 
@@ -157,6 +160,7 @@ def _render_quote(
         request=request, name="quote.html", status_code=status_code,
         context={
             "quote": view,
+            "brand": resolve_brand(_settings, settings_service.get_company_settings(session)),
             "nonce": nonce,
             "signature": signature,
             "error": error,
@@ -364,6 +368,74 @@ async def request_changes(
                 "currency": "",
             },
         )
+
+
+@app.get("/brand.css")
+async def brand_stylesheet() -> Response:
+    """Brand colours as a real stylesheet.
+
+    Served rather than inlined so the Content-Security-Policy can stay at
+    ``style-src 'self'`` — an inline block would need 'unsafe-inline' on every
+    page just to set three colours.
+    """
+    with session_scope() as session:
+        brand = resolve_brand(_settings, settings_service.get_company_settings(session))
+    return Response(content=brand.css(), media_type="text/css")
+
+
+@app.get("/quote/public/{token}/assets/product/{item_ref}")
+async def product_image(request: Request, token: str, item_ref: str) -> Response:
+    """A product photograph, proxied.
+
+    Deliberately not counted as a quotation view: a page with eight products
+    would otherwise register nine views and make "first viewed" meaningless.
+    """
+    if not _view_limiter.allow(client_fingerprint(request, _settings.secret_key)):
+        return _too_many(request)
+
+    with session_scope() as session:
+        try:
+            access = portal_service.resolve_token(session, token)
+        except PortalAccessError:
+            # Same generic answer as everywhere else: an image request must not
+            # become an oracle for whether a token is live.
+            return _not_found(request)
+
+        quotation = session.get(Quotation, access.quotation_id)
+        item = assets.resolve_item_by_ref(access, quotation, item_ref)
+        if item is None:
+            payload = assets.placeholder()
+        else:
+            payload = assets.load_product_image(item)
+
+    return Response(
+        content=payload.content,
+        media_type=payload.media_type,
+        headers={"Content-Disposition": "inline"},
+    )
+
+
+@app.get("/quote/public/{token}/assets/logo")
+async def company_logo(request: Request, token: str) -> Response:
+    """The company logo, behind the same token check."""
+    if not _view_limiter.allow(client_fingerprint(request, _settings.secret_key)):
+        return _too_many(request)
+
+    with session_scope() as session:
+        try:
+            portal_service.resolve_token(session, token)
+        except PortalAccessError:
+            return _not_found(request)
+        company = settings_service.get_company_settings(session)
+        payload = assets.load_company_logo(company.logo_key if company else None)
+
+    if payload is None:
+        return _not_found(request)
+    return Response(
+        content=payload.content,
+        media_type=payload.media_type,
+        headers={"Content-Disposition": "inline"},
+    )
 
 
 # GET must never change state: the approval and change-request paths are POST
