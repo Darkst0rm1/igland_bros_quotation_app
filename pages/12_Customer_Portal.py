@@ -273,13 +273,9 @@ with session_scope() as db:
         for t in tokens
     ]
 
-if link_rows:
-    st.dataframe(
-        pd.DataFrame([{k: v for k, v in r.items() if not k.startswith("_")} for r in link_rows]),
-        width="stretch", hide_index=True,
-    )
-else:
-    st.caption("No link has been issued for this quotation yet.")
+# The table is rendered after the controls below, not here: this list was read
+# before the buttons ran, so drawing it now would show "none issued" in the very
+# render where a link was just created.
 
 # A freshly minted link is held for this run only, so it can be copied. It is
 # never written to session state, a log, or anywhere it could outlive the page.
@@ -352,6 +348,33 @@ with revoke_col:
             st.rerun()
     elif live:
         st.caption("You do not have permission to revoke customer links.")
+
+
+# Re-read after the actions so the table reflects anything just done.
+with session_scope() as db:
+    refreshed = db.execute(
+        select(QuoteAccessToken)
+        .where(QuoteAccessToken.quotation_id == quote_id)
+        .order_by(QuoteAccessToken.id.desc())
+    ).scalars().all()
+    refreshed_rows = [
+        {
+            "Issued": format_datetime(t.created_at),
+            "Expires": format_datetime(t.expires_at),
+            "State": (
+                "Revoked" if t.revoked_at else ("Live" if t.is_usable() else "Expired")
+            ),
+            "Views": t.view_count,
+            "First viewed": format_datetime(t.first_viewed_at),
+            "Last viewed": format_datetime(t.last_viewed_at),
+        }
+        for t in refreshed
+    ]
+
+if refreshed_rows:
+    st.dataframe(pd.DataFrame(refreshed_rows), width="stretch", hide_index=True)
+else:
+    st.caption("No link has been issued for this quotation yet.")
 
 
 # --------------------------------------------------------------------------- #

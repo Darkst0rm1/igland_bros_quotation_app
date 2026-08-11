@@ -436,3 +436,40 @@ class TestNonce:
         nonce, signature = portal_service.issue_submission_nonce(first)
         with pytest.raises(PortalError):
             portal_service.verify_submission_nonce(second, nonce, signature)
+
+
+class TestPermissionSeparation:
+    """Publishing is not a consequence of being able to price."""
+
+    def test_a_pricing_admin_can_price_but_cannot_publish(self, session, sent, make_auth_user):
+        from modules.constants import RoleCode
+
+        pricer = make_auth_user(RoleCode.PRICING_ADMIN.value, username="pricer")
+
+        # The separation only means anything if pricing really is granted.
+        assert pricer.has(Perm.PRICE_MANAGE)
+
+        assert not pricer.has(Perm.QUOTE_PORTAL_LINK_ISSUE)
+        assert not pricer.has(Perm.QUOTE_PORTAL_LINK_REVOKE)
+        assert not pricer.has(Perm.QUOTE_PORTAL_PREVIEW)
+        assert not pricer.has(Perm.QUOTE_PORTAL_VIEW_RESPONSE)
+
+    def test_the_service_refuses_not_just_the_button(self, session, sent, sales, make_auth_user):
+        """Hiding a control is a courtesy; the service check is the control."""
+        from modules.constants import RoleCode
+
+        pricer = make_auth_user(RoleCode.PRICING_ADMIN.value, username="pricer2")
+        token, _ = issue_token(session, sales, sent)
+
+        with pytest.raises(PermissionDenied):
+            issue_token(session, pricer, sent)
+        with pytest.raises(PermissionDenied):
+            portal_service.revoke_token(session, pricer, token)
+
+    def test_finance_may_read_a_response_but_not_publish(self, session, make_auth_user):
+        from modules.constants import RoleCode
+
+        finance = make_auth_user(RoleCode.FINANCE.value, username="fin")
+        assert finance.has(Perm.QUOTE_PORTAL_VIEW_RESPONSE)
+        assert not finance.has(Perm.QUOTE_PORTAL_LINK_ISSUE)
+        assert not finance.has(Perm.QUOTE_PORTAL_LINK_REVOKE)
