@@ -369,3 +369,37 @@ class TestLogHygiene:
             if r.name.startswith(("portal", "uvicorn", "modules"))
         ]
         assert not any(raw in message for message in ours)
+
+
+class TestRateFormatting:
+    """Decimal keeps its scale, so ":g" does not strip trailing zeros."""
+
+    @pytest.mark.parametrize(
+        "rate,expected",
+        [("13", "Tax (13%)"), ("25.0000", "Tax (25%)"),
+         ("13.005", "Tax (13.005%)"), ("0", "Tax")],
+    )
+    def test_the_tax_label_drops_stored_scale_without_losing_precision(
+        self, rate, expected
+    ):
+        from decimal import Decimal
+
+        from portal.projection import _tax_label
+
+        assert _tax_label(Decimal(rate)) == expected
+
+    def test_normalize_alone_would_produce_scientific_notation(self):
+        """Why the label quantizes after normalising.
+
+        normalize() turns a trailing-zero value whose zeros sit *before* the
+        decimal point into an exponent — 1000.000 becomes 1E+3 — which would
+        reach a customer as the literal string. The quantize step undoes it.
+        """
+        from decimal import Decimal
+
+        assert str(Decimal("1000.000").normalize()) == "1E+3"
+
+        from portal.projection import _tax_label
+
+        assert _tax_label(Decimal("1000.000")) == "Tax (1000%)"
+        assert "E+" not in _tax_label(Decimal("1000.000"))

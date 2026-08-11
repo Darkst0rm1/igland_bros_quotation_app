@@ -263,6 +263,8 @@ def _tax_label(rate: Decimal | None) -> str:
     """
     if not rate:
         return "Tax"
+    # normalize() alone turns 25.0000 into 2.5E+1, so quantize back to an
+    # integer when the value has no fractional part.
     trimmed = rate.normalize()
     if trimmed == trimmed.to_integral_value():
         trimmed = trimmed.quantize(Decimal(1))

@@ -70,6 +70,7 @@ from modules.utilities import (
     format_date,
     format_datetime,
     format_money,
+    format_percent,
     format_pack_price,
     format_quantity,
 )
@@ -1668,7 +1669,7 @@ with review_tab:
                 f"{portal_summary['item_count']}"
             )
             st.caption("Deposit")
-            st.markdown(f"**{portal_summary['deposit_pct']:g}%**")
+            st.markdown(f"**{format_percent(portal_summary['deposit_pct'])}**")
         with col_link:
             st.caption("Customer link")
             if live_links:
