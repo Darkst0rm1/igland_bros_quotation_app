@@ -324,34 +324,27 @@ def normalise_selection(
 def compute_selection_totals(
     quotation: Quotation, selected_ids: list[int] | None = None
 ) -> QuotationTotals:
-    """Recalculate the quotation for a given set of optional lines.
+    """Recalculate for a given set of optional lines.
 
-    **Reads prices from the database, never from the request.** The caller
-    passes ids; every figure comes from the stored line.
+    Delegates to :mod:`modules.pricing_snapshot`, which is the only place in
+    the application that adds money up. Kept as a thin wrapper because callers
+    already expect a QuotationTotals.
     """
-    chosen = set(normalise_selection(quotation, selected_ids))
+    from modules import pricing_snapshot
 
-    lines = [
-        compute_line(_line_input(item))
-        for item in quotation.items
-        if item.inclusion is ItemInclusion.INCLUDED or item.id in chosen
-    ]
-    charges = [
-        ChargeInput(
-            quantity=c.quantity_value,
-            rate=c.rate,
-            exchange_rate=c.exchange_rate,
-            is_taxable=c.is_taxable,
-            is_customer_visible=c.is_customer_visible,
-        )
-        for c in quotation.charges
-    ]
-    return compute_totals(
-        lines,
-        charges=charges,
-        quotation_discount_pct=quotation.quote_discount_pct,
-        quotation_discount_amount=quotation.quote_discount_amount or None,
-        tax_rate_pct=quotation.tax_rate_pct,
+    snapshot = pricing_snapshot.selected(quotation, selected_ids)
+    return QuotationTotals(
+        subtotal=snapshot.subtotal,
+        quotation_discount=snapshot.discount,
+        charges_total=snapshot.charges_total,
+        charges_customer_visible=snapshot.charges_customer_visible,
+        taxable_base=snapshot.taxable_base,
+        tax_amount=snapshot.tax_amount,
+        grand_total=snapshot.grand_total,
+        total_cost=None,
+        gross_profit=None,
+        gross_margin_pct=None,
+        total_savings=None,
     )
 
 

@@ -44,6 +44,7 @@ from modules.calculation_engine import (
     q_money,
 )
 from modules.constants import (
+    ItemInclusion,
     STATUS_TRANSITIONS,
     STATUSES_REQUIRING_NOTE,
     AuditAction,
@@ -864,9 +865,16 @@ def recompute_totals(session: Session, quotation: Quotation) -> QuotationTotals:
         .order_by(QuotationItem.sort_order, QuotationItem.line_no)
     ).scalars().all()
 
+    # Stored totals are the BASE offer: INCLUDED lines only. An OPTIONAL or
+    # RECOMMENDED line costs nothing until the customer selects it, so counting
+    # it here would make every employee list and report quote a figure the
+    # customer was never offered. The all-options figure is derived on demand
+    # from pricing_snapshot rather than stored, so it cannot drift.
     line_results = []
     for item in items:
         _recompute_line(session, item)
+        if item.inclusion is not ItemInclusion.INCLUDED:
+            continue
         line_results.append(
             compute_line(
                 LineInput(
