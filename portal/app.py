@@ -109,6 +109,19 @@ _download_limiter = RateLimiter(limit=12, window_seconds=300)
 #: A render that has not finished in this long is abandoned and the request
 #: answered with the generic error. The work is also bounded at the input by
 #: portal.pdf_model.MAX_LINES, so this is a backstop rather than the only limit.
+#:
+#: Honest about what this is: a *request* timeout, not a hard one. The thread
+#: keeps running after the wait expires — Python cannot preempt it — so a
+#: pathological document still costs CPU until it finishes. What makes that
+#: acceptable is the input bound: 400 lines is a ceiling on the work, not just
+#: on the wait, and no public input can raise it.
+#:
+#: A true hard timeout needs the render in a subprocess that can be killed.
+#: Deferred deliberately: it adds process management, serialisation of the
+#: model across a pipe, and a new failure mode (a worker pool that dies) in
+#: exchange for closing a gap the input bound already narrows to a few seconds
+#: of CPU. Worth revisiting if line limits are ever raised or if rendering grows
+#: expensive per line.
 PDF_TIMEOUT_SECONDS = 20
 
 

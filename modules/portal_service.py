@@ -141,6 +141,47 @@ def issue_token(
     return token, raw
 
 
+def build_link(raw_token: str) -> str:
+    """The URL a customer opens. Built from configuration, never from input."""
+    base = (get_settings().portal_base_url or "").rstrip("/")
+    return f"{base}/quote/public/{raw_token}" if base else f"/quote/public/{raw_token}"
+
+
+def issue_and_queue_invitation(
+    session: Session,
+    user: AuthUser,
+    quotation: Quotation,
+    *,
+    revised: bool = False,
+    previous_revision_label: str = "",
+    change_summary: str = "",
+    expires_at: dt.datetime | None = None,
+) -> tuple[QuoteAccessToken, str]:
+    """Mint a link and queue the invitation carrying it, in one transaction.
+
+    These two belong together: issuing is the only moment the plaintext token
+    exists, so it is also the only moment an invitation can be prepared. The
+    email service seals it immediately, and this function returns the plaintext
+    once — the caller may show it, and nothing stores it.
+
+    Both happen or neither does. A link issued without its invitation is a link
+    the customer never receives; an invitation queued without a link is a
+    message that can never be sent.
+    """
+    from modules import email_notifications
+
+    token, raw = issue_token(session, user, quotation, expires_at=expires_at)
+    email_notifications.queue_invitation(
+        session, quotation, build_link(raw),
+        revised=revised,
+        previous_revision_label=previous_revision_label,
+        change_summary=change_summary,
+        # A reissued link is a new message, not a duplicate of the earlier one.
+        discriminator=str(token.id),
+    )
+    return token, raw
+
+
 def revoke_token(session: Session, user: AuthUser, token: QuoteAccessToken) -> None:
     """Kill a link immediately. Idempotent."""
     require(user, Perm.QUOTE_PORTAL_LINK_REVOKE)
@@ -604,9 +645,17 @@ def approve(
     # commits with the acceptance or not at all, so an accepted quotation
     # always has a job — but producing the PDF happens afterwards, and the
     # customer never waits for a renderer or an object store to be reachable.
-    from modules import quote_document_service
+    from modules import email_notifications, quote_document_service
 
     quote_document_service.enqueue(session, response)
+
+    # And the messages this acceptance calls for. Queued, not sent: an SMTP
+    # call here would hold the transaction open across a round trip to somebody
+    # else's server, or send a confirmation for an approval that then rolled
+    # back. A failure to *queue* does roll the acceptance back, which is the
+    # intended asymmetry — a notification that cannot be recorded at all means
+    # something is wrong enough that the event should not stand.
+    email_notifications.on_customer_approved(session, quotation, response)
 
     # The accepted revision becomes immutable; further changes need a revision.
     quotation.is_locked = True
@@ -680,6 +729,10 @@ def request_changes(
     )
     session.add(response)
     session.flush()
+
+    from modules import email_notifications
+
+    email_notifications.on_customer_requested_changes(session, quotation, response)
 
     quotation_service.change_status(
         session, portal_actor(session), quotation,

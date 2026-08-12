@@ -233,6 +233,93 @@ honest about how it works rather than pretending a cron job exists.
 
 ---
 
+## 5a. The background worker
+
+Three things have to happen without anybody pressing a button: unreferenced
+storage objects are deleted, accepted quotations get their signed PDF, and
+queued emails are sent. That is what `modules/worker.py` does.
+
+```bash
+python -m modules.worker --once            # one sweep, then exit — for cron
+python -m modules.worker --loop            # run as a service
+python -m modules.worker --loop --interval 60 --batch 50
+```
+
+**It does not run on Streamlit Community Cloud.** That container sleeps when
+idle, which is exactly what a timer cannot tolerate — the same reason quotation
+expiry is a manual sweep. The worker belongs on whatever host runs the customer
+portal, on a small always-on machine, or on any scheduler that can invoke
+`--once` every few minutes.
+
+| Signal | Meaning |
+|---|---|
+| Exit code 0 from `--once` | Every subsystem swept cleanly |
+| Exit code 1 from `--once` | At least one subsystem failed; the others still ran |
+| `WORKER_HEALTH_FILE` | Written after every sweep — check its mtime for liveness |
+
+`SIGINT` and `SIGTERM` ask for a graceful stop: the worker finishes the sweep it
+is in rather than abandoning leased rows mid-send.
+
+Each subsystem is swept independently. An unreachable mail server does not stop
+PDFs being produced, and a broken renderer does not stop email going out.
+
+---
+
+## 5b. Turning email on
+
+Email is **off by default**, in every environment. With it off, messages are
+still queued — the outbox row is the business record — and delivered whenever it
+is switched on. Nothing is lost in the meantime.
+
+| Setting | Notes |
+|---|---|
+| `EMAIL_ENABLED` | Master switch. Off means "queue but do not send" |
+| `EMAIL_BACKEND` | `smtp` in production. `console` locally, `memory` in tests — neither can reach the network |
+| `EMAIL_FROM_ADDRESS` | Required when enabled |
+| `EMAIL_INTERNAL_RECIPIENTS` | Comma-separated. Blank means no internal notifications |
+| `SMTP_HOST` / `SMTP_PORT` | Port 587 with `SMTP_SECURITY=starttls`, or 465 with `tls` |
+| `SMTP_USERNAME` / `SMTP_PASSWORD` | Omit if the relay authorises by IP |
+| `EMAIL_PAYLOAD_KEYS` | `v1:<base64>` — required when enabled. See below |
+| `EMAIL_PAYLOAD_KEY_VERSION` | Which key new messages are sealed under |
+
+Production **refuses to start** if email is enabled without a sender, an SMTP
+host, or encryption keys — or with a backend that delivers nothing. Half a
+configuration would mean customers silently never receiving their quotations.
+
+### Encryption keys
+
+An invitation email carries the customer's quotation link. The portal stores
+only a hash of each token, so nothing else in the database can reproduce a
+working link, and that must stay true while a message waits in the queue. The
+link is therefore sealed with AES-256-GCM under a key held only in
+configuration.
+
+Generate one with:
+
+```bash
+python -c "from modules.secret_box import generate_key; print(generate_key())"
+```
+
+**To rotate:** add the new key alongside the old one and point the version at
+it. Queued messages sealed under the previous key still open, because the
+version travels with each payload.
+
+```
+EMAIL_PAYLOAD_KEYS=v1:<old>,v2:<new>
+EMAIL_PAYLOAD_KEY_VERSION=v2
+```
+
+Remove `v1` only once no queued invitation still references it — roughly
+`EMAIL_PAYLOAD_TTL_HOURS` after the rotation. Removing it earlier makes those
+invitations unsendable; they fail safely and a new link can be issued.
+
+**Duplicates are possible, rarely.** If the mail server accepts a message and
+the worker dies before recording that it did, a later sweep sends it again.
+Nothing in SMTP can close that window. Queuing the same notification twice —
+the far more common cause — is prevented outright by the idempotency key.
+
+---
+
 ## 6. Troubleshooting
 
 | Symptom | Cause | Fix |

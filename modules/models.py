@@ -54,6 +54,9 @@ from modules.constants import (
     CustomerResponse,
     CustomerStatus,
     DocumentJobStatus,
+    EmailFailureCategory,
+    EmailMessageType,
+    EmailOutboxStatus,
     ImportJobStatus,
     ImportRowAction,
     ImportRowStatus,
@@ -1346,6 +1349,125 @@ class QuoteDocumentJob(Base):
     completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 
     response: Mapped[PortalResponse] = relationship()
+
+
+class EmailOutbox(Base):
+    """A delivery intent, written inside the transaction that caused it.
+
+    The point of a database-backed outbox is that sending and the business
+    event cannot be made atomic. An SMTP call inside the approval transaction
+    would either hold the transaction open across a network round trip, or send
+    a confirmation for an approval that then rolled back. So the *intent* is
+    committed with the event, and the sending happens afterwards, from here.
+
+    Everything the message needs is snapshotted onto the row — brand, totals,
+    recipient, revision — rather than re-read at send time. A quotation revised
+    between queueing and sending must not silently change what the email says
+    it is about.
+
+    ``secure_payload`` is the one exception to the portal's "no plaintext
+    tokens" rule, and it is not really an exception: it holds the customer's
+    capability URL sealed with AES-256-GCM under a key that lives only in the
+    environment, bound to this quotation, revision, recipient and purpose. A
+    database disclosure still yields no working link. It is erased once the
+    message is sent or the resend window closes.
+    """
+
+    __tablename__ = "email_outbox"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    message_type: Mapped[EmailMessageType] = mapped_column(
+        _enum(EmailMessageType), nullable=False, index=True
+    )
+    quotation_id: Mapped[int] = mapped_column(
+        ForeignKey("quotations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    #: The revision this message is about. Carried explicitly so a retry sends
+    #: what was intended, not what the quotation has since become.
+    revision_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    portal_response_id: Mapped[int | None] = mapped_column(
+        ForeignKey("portal_responses.id", ondelete="SET NULL")
+    )
+
+    recipient_email: Mapped[str] = mapped_column(String(255), nullable=False)
+    recipient_name: Mapped[str | None] = mapped_column(String(160))
+    #: Rendered at enqueue so an employee can see what went out without the row
+    #: having to hold a body. Contains no secret: the link lives only in the
+    #: sealed payload.
+    subject: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+
+    #: How the company presented itself when this was queued. A rebrand between
+    #: queueing and sending must not restyle a message about an old quotation.
+    brand_snapshot_json: Mapped[Any | None] = mapped_column(JSONType)
+    #: Everything the template needs, already customer-safe. Rendering reads
+    #: this and the brand snapshot and nothing else.
+    template_data_json: Mapped[Any | None] = mapped_column(JSONType)
+
+    #: Unique. Derived from what the message *is*, so enqueueing the same
+    #: notification twice is a no-op rather than two emails to a customer.
+    idempotency_key: Mapped[str] = mapped_column(
+        String(120), nullable=False, unique=True
+    )
+
+    status: Mapped[EmailOutboxStatus] = mapped_column(
+        _enum(EmailOutboxStatus), nullable=False,
+        default=EmailOutboxStatus.QUEUED, index=True,
+    )
+    attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    #: When this row becomes eligible again. Backoff is expressed here rather
+    #: than by sleeping, so a worker restart does not lose the schedule.
+    next_attempt_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+
+    lease_owner: Mapped[str | None] = mapped_column(String(64))
+    lease_expires_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    queued_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        default=lambda: dt.datetime.now(dt.UTC),
+    )
+    last_attempt_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    sent_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    failed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    #: Whatever reference the provider gave back, when it gave one.
+    provider_message_id: Mapped[str | None] = mapped_column(String(255))
+    failure_category: Mapped[EmailFailureCategory | None] = mapped_column(
+        _enum(EmailFailureCategory)
+    )
+    #: A short token such as "smtp_451" or "invalid_recipient". Never the
+    #: provider's own text, which quotes the recipient and subject back and
+    #: would then be stored and shown.
+    failure_code: Mapped[str | None] = mapped_column(String(60))
+
+    #: Sealed capability URL. Never plaintext, never logged, never in a repr.
+    secure_payload: Mapped[str | None] = mapped_column(Text)
+    #: After this the payload is erased and the message can no longer be sent.
+    secure_payload_expires_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+    quotation: Mapped[Quotation] = relationship()
+
+    __table_args__ = (
+        Index("ix_email_outbox_status_next", "status", "next_attempt_at"),
+        Index("ix_email_outbox_quotation_type", "quotation_id", "message_type"),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        # Never the payload, never the template data. Both can carry the link.
+        return (
+            f"<EmailOutbox id={self.id} type={self.message_type} "
+            f"status={self.status} attempts={self.attempts}>"
+        )
+
+    @property
+    def has_secure_payload(self) -> bool:
+        return bool(self.secure_payload)
 
 
 class StorageCleanup(Base):

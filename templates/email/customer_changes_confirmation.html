@@ -1,0 +1,37 @@
+{% extends "_base.html" %}
+{% import "_parts.html" as parts %}
+{% block content %}
+
+<p style="font-size:16px; line-height:1.6; margin:0 0 14px;">
+  Dear {{ data.customer_name }},
+</p>
+
+<p style="font-size:15px; line-height:1.7; margin:0 0 4px;">
+  Thank you — we have received your request for changes to
+  {{ data.quote_number }} and passed it to
+  {% if data.sales_representative %}{{ data.sales_representative }}{% else %}your
+  representative{% endif %}. You do not need to do anything further for now.
+</p>
+
+{{ parts.summary_table(data, show_validity=False) }}
+
+{% if data.comment %}
+<p style="font-size:14px; line-height:1.7; color:#5f6b7a; margin:0 0 6px;">
+  What you asked for:
+</p>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+       style="background:#f7f9fb; border-left:3px solid #c8d0da; border-radius:4px;
+              margin:0 0 18px;">
+  <tr>
+    <td style="padding:13px 15px; font-size:14px; line-height:1.7;
+               white-space:pre-wrap;">{{ data.comment }}</td>
+  </tr>
+</table>
+{% endif %}
+
+<p style="font-size:14px; line-height:1.7; margin:0 0 14px;">
+  We will send a revised quotation shortly. The figures above are from the
+  version you were looking at and may change once it is revised.
+</p>
+
+{% endblock %}

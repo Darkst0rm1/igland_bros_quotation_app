@@ -1,0 +1,33 @@
+{% extends "_base.html" %}
+{% import "_parts.html" as parts %}
+{% block content %}
+
+<p style="font-size:16px; line-height:1.6; margin:0 0 14px;">
+  Dear {{ data.customer_name }},
+</p>
+
+<p style="font-size:15px; line-height:1.7; margin:0 0 4px;">
+  Thank you for your enquiry. Your quotation is ready and you can review it
+  online, choose any optional items you would like included, and approve it or
+  ask us for changes — all from the page below.
+</p>
+
+{{ parts.summary_table(data) }}
+
+{% if data.has_optional_items %}
+<p style="font-size:14px; line-height:1.7; color:#5f6b7a; margin:0 0 4px;">
+  This quotation includes optional items. They are not part of the total above
+  until you select them.
+</p>
+{% endif %}
+
+{{ parts.view_button(secure_url, "View your quotation", brand) }}
+{{ parts.link_fallback(secure_url) }}
+
+<p style="font-size:14px; line-height:1.7; margin:0 0 14px;">
+  If you have any questions, simply reply to this message and
+  {% if data.sales_representative %}{{ data.sales_representative }}{% else %}your
+  representative{% endif %} will be glad to help.
+</p>
+
+{% endblock %}

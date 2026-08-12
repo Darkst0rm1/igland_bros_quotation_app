@@ -1,0 +1,29 @@
+{{ brand.name }}
+{{ "=" * brand.name|length }}
+
+Dear {{ data.customer_name }},
+
+YOUR ACCEPTANCE HAS BEEN RECORDED. Thank you for your order.
+
+This message confirms what you accepted on {{ data.accepted_at_display }}.
+Please keep it for your records.
+
+  Quotation:   {{ data.quote_number }} - {{ data.revision_label }}
+{% if data.project_name %}  Project:     {{ data.project_name }}
+{% endif %}  {{ data.total_label }}: {{ data.total_display }}
+{% if data.deposit_display %}  Deposit due: {{ data.deposit_display }}
+{% endif %}
+{% if data.selected_items %}Optional items you selected:
+{% for item in data.selected_items %}  - {{ item }}
+{% endfor %}
+{% endif %}{% if data.sales_representative %}{{ data.sales_representative }} will{% else %}We will{% endif %} be in touch shortly to confirm the next steps. A signed
+copy of your quotation is available from the quotation page we sent you.
+
+--
+{{ brand.name }}
+{% for line in brand.address_lines %}{{ line }}
+{% endfor %}{% if brand.phone %}{{ brand.phone }}
+{% endif %}{% if brand.email %}{{ brand.email }}
+{% endif %}{% if brand.legal_footer %}
+{{ brand.legal_footer }}
+{% endif %}

@@ -643,6 +643,13 @@ class QuoteEventType(StrEnum):
     LINK_REVOKED = "LINK_REVOKED"
     VIEWED = "VIEWED"
     PDF_DOWNLOADED = "PDF_DOWNLOADED"
+    # Queued and delivered are separate facts. A message can sit in the outbox
+    # for minutes, and "we told the customer" is only true of the second one.
+    # Neither is a view: an email leaving the building says nothing about
+    # whether anybody opened the quotation.
+    EMAIL_QUEUED = "EMAIL_QUEUED"
+    EMAIL_SENT = "EMAIL_SENT"
+    EMAIL_FAILED = "EMAIL_FAILED"
     APPROVED = "APPROVED"
     CHANGES_REQUESTED = "CHANGES_REQUESTED"
     ACCESS_DENIED = "ACCESS_DENIED"
@@ -687,6 +694,82 @@ DOCUMENT_JOB_DISPLAY_NAMES: dict[DocumentJobStatus, str] = {
     DocumentJobStatus.READY: "Ready",
     DocumentJobStatus.FAILED: "Needs attention",
 }
+
+
+class EmailMessageType(StrEnum):
+    """Which of the six messages an outbox row is.
+
+    Split into customer-facing and internal, because the two have different
+    rules: a customer message carries the capability URL and never an internal
+    figure, an internal message carries neither the URL nor anything a customer
+    would need.
+    """
+
+    QUOTE_INVITATION = "QUOTE_INVITATION"
+    QUOTE_REVISED_INVITATION = "QUOTE_REVISED_INVITATION"
+    CUSTOMER_APPROVAL_CONFIRMATION = "CUSTOMER_APPROVAL_CONFIRMATION"
+    CUSTOMER_CHANGES_CONFIRMATION = "CUSTOMER_CHANGES_CONFIRMATION"
+    INTERNAL_APPROVAL_NOTICE = "INTERNAL_APPROVAL_NOTICE"
+    INTERNAL_CHANGES_NOTICE = "INTERNAL_CHANGES_NOTICE"
+
+
+#: The messages that carry a customer's capability URL. Everything else must
+#: never be given one — asserted by the test suite against the rendered bodies.
+LINK_BEARING_MESSAGES: frozenset[EmailMessageType] = frozenset({
+    EmailMessageType.QUOTE_INVITATION,
+    EmailMessageType.QUOTE_REVISED_INVITATION,
+})
+
+#: Messages that go to employees rather than to the customer.
+INTERNAL_MESSAGES: frozenset[EmailMessageType] = frozenset({
+    EmailMessageType.INTERNAL_APPROVAL_NOTICE,
+    EmailMessageType.INTERNAL_CHANGES_NOTICE,
+})
+
+EMAIL_MESSAGE_DISPLAY_NAMES: dict[EmailMessageType, str] = {
+    EmailMessageType.QUOTE_INVITATION: "Quotation sent",
+    EmailMessageType.QUOTE_REVISED_INVITATION: "Revised quotation sent",
+    EmailMessageType.CUSTOMER_APPROVAL_CONFIRMATION: "Acceptance confirmation",
+    EmailMessageType.CUSTOMER_CHANGES_CONFIRMATION: "Change request confirmation",
+    EmailMessageType.INTERNAL_APPROVAL_NOTICE: "Internal: quotation accepted",
+    EmailMessageType.INTERNAL_CHANGES_NOTICE: "Internal: changes requested",
+}
+
+
+class EmailOutboxStatus(StrEnum):
+    """Where a queued message has got to.
+
+    ``SENDING`` exists so a row a worker is holding is distinguishable from one
+    waiting to be picked up — an employee looking at a stuck queue needs to see
+    the difference between "nothing is working on this" and "something is".
+    """
+
+    QUEUED = "QUEUED"
+    SENDING = "SENDING"
+    SENT = "SENT"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+EMAIL_STATUS_DISPLAY_NAMES: dict[EmailOutboxStatus, str] = {
+    EmailOutboxStatus.QUEUED: "Queued",
+    EmailOutboxStatus.SENDING: "Sending",
+    EmailOutboxStatus.SENT: "Sent",
+    EmailOutboxStatus.FAILED: "Failed",
+    EmailOutboxStatus.CANCELLED: "Cancelled",
+}
+
+
+class EmailFailureCategory(StrEnum):
+    """Whether a failure is worth trying again.
+
+    A greylisting relay and a malformed address both "failed to send", and
+    treating them the same means either giving up on deliverable mail or
+    retrying undeliverable mail until the attempt limit.
+    """
+
+    TEMPORARY = "TEMPORARY"
+    PERMANENT = "PERMANENT"
 
 
 class SendMethod(StrEnum):
@@ -755,6 +838,9 @@ class AuditAction(StrEnum):
     QUOTE_LINK_REVOKED = "QUOTE_LINK_REVOKED"
     CUSTOMER_APPROVED = "CUSTOMER_APPROVED"
     CUSTOMER_REQUESTED_CHANGES = "CUSTOMER_REQUESTED_CHANGES"
+    EMAIL_QUEUED = "EMAIL_QUEUED"
+    EMAIL_SENT = "EMAIL_SENT"
+    EMAIL_FAILED = "EMAIL_FAILED"
     STATUS_CHANGED = "STATUS_CHANGED"
     REVISION_CREATED = "REVISION_CREATED"
     CUSTOMER_RESPONSE_LOGGED = "CUSTOMER_RESPONSE_LOGGED"

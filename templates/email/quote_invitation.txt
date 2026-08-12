@@ -1,0 +1,32 @@
+{{ brand.name }}
+{{ "=" * brand.name|length }}
+
+Dear {{ data.customer_name }},
+
+Thank you for your enquiry. Your quotation is ready. You can review it online,
+choose any optional items you would like included, and approve it or ask us for
+changes.
+
+  Quotation:   {{ data.quote_number }} - {{ data.revision_label }}
+{% if data.project_name %}  Project:     {{ data.project_name }}
+{% endif %}  {{ data.total_label }}: {{ data.total_display }}
+{% if data.valid_until_display %}  Valid until: {{ data.valid_until_display }}
+{% endif %}
+{% if data.has_optional_items %}This quotation includes optional items. They are not part of the total above
+until you select them.
+
+{% endif %}View your quotation:
+
+{{ secure_url }}
+
+If you have any questions, simply reply to this message and {% if data.sales_representative %}{{ data.sales_representative }}{% else %}your representative{% endif %}
+will be glad to help.
+
+--
+{{ brand.name }}
+{% for line in brand.address_lines %}{{ line }}
+{% endfor %}{% if brand.phone %}{{ brand.phone }}
+{% endif %}{% if brand.email %}{{ brand.email }}
+{% endif %}{% if brand.legal_footer %}
+{{ brand.legal_footer }}
+{% endif %}

@@ -21,6 +21,12 @@ pydantic-settings==2.14.2
 python-dotenv==1.2.2
 
 # --- Security -------------------------------------------------------------
+# AES-256-GCM, for the one secret the database has to carry: a queued
+# invitation's capability URL. The portal otherwise stores only token hashes,
+# and authenticated encryption under an environment-held key is what keeps that
+# property true while an email waits in the outbox. Hand-rolling an AEAD from
+# hashlib was the alternative and is not one.
+cryptography==50.0.0
 # bcrypt is used directly rather than via passlib: passlib 1.7.4 is unmaintained
 # and probes bcrypt.__about__.__version__, which bcrypt >= 4.1 removed.
 bcrypt==5.0.0

@@ -1,0 +1,14 @@
+{{ brand.name }} - internal notification
+{{ "=" * (brand.name|length + 25) }}
+
+{{ data.quote_number }} {{ data.revision_label }} WAS ACCEPTED by {{ data.customer_company }}
+
+{% for label, value in data.rows %}  {{ "%-22s"|format(label ~ ":") }}{{ value }}
+{% endfor %}
+{% if data.comment %}Customer comment:
+
+{{ data.comment }}
+
+{% endif %}Open {{ data.quote_number }} in the quotation application to see the signed copy
+and the full response. This message deliberately contains no customer access
+link.

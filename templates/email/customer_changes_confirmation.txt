@@ -1,0 +1,28 @@
+{{ brand.name }}
+{{ "=" * brand.name|length }}
+
+Dear {{ data.customer_name }},
+
+Thank you - we have received your request for changes to {{ data.quote_number }}
+and passed it to {% if data.sales_representative %}{{ data.sales_representative }}{% else %}your representative{% endif %}. You do not need to do anything
+further for now.
+
+  Quotation:   {{ data.quote_number }} - {{ data.revision_label }}
+{% if data.project_name %}  Project:     {{ data.project_name }}
+{% endif %}  {{ data.total_label }}: {{ data.total_display }}
+{% if data.comment %}
+What you asked for:
+
+{{ data.comment }}
+{% endif %}
+We will send a revised quotation shortly. The figures above are from the version
+you were looking at and may change once it is revised.
+
+--
+{{ brand.name }}
+{% for line in brand.address_lines %}{{ line }}
+{% endfor %}{% if brand.phone %}{{ brand.phone }}
+{% endif %}{% if brand.email %}{{ brand.email }}
+{% endif %}{% if brand.legal_footer %}
+{{ brand.legal_footer }}
+{% endif %}
