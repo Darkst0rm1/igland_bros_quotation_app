@@ -46,9 +46,15 @@ SECURITY_HEADERS = {
     "Content-Security-Policy": CONTENT_SECURITY_POLICY,
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
-    # no-referrer, not same-origin: the URL *is* the credential, and must never
-    # be sent to anywhere the customer clicks through to.
-    "Referrer-Policy": "no-referrer",
+    # same-origin, not no-referrer. The URL is the credential, so it must never
+    # reach a third party — same-origin achieves that, because a cross-origin
+    # request sends no Referer at all.
+    #
+    # no-referrer looked stricter and was worse: it also strips the header from
+    # our *own* form posts, and Chromium suppresses Origin alongside it, so
+    # origin_is_allowed() saw neither and refused every approval. The stricter
+    # policy made the feature impossible to use rather than safer.
+    "Referrer-Policy": "same-origin",
     "Permissions-Policy": "geolocation=(), microphone=(), camera=(), interest-cohort=()",
     "Cross-Origin-Opener-Policy": "same-origin",
     "Cross-Origin-Resource-Policy": "same-origin",

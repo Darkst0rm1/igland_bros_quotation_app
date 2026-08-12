@@ -176,7 +176,7 @@ class TestSecurityHeaders:
             assert "no-store" in response.headers["cache-control"]
             assert "private" in response.headers["cache-control"]
             assert response.headers["pragma"] == "no-cache"
-            assert response.headers["referrer-policy"] == "no-referrer"
+            assert response.headers["referrer-policy"] == "same-origin"
             assert response.headers["x-content-type-options"] == "nosniff"
             assert response.headers["x-frame-options"] == "DENY"
             csp = response.headers["content-security-policy"]
@@ -403,3 +403,32 @@ class TestRateFormatting:
 
         assert _tax_label(Decimal("1000.000")) == "Tax (1000%)"
         assert "E+" not in _tax_label(Decimal("1000.000"))
+
+
+class TestOriginCheckDoesNotBlockOurOwnForms:
+    """The referrer policy and the CSRF check have to coexist.
+
+    no-referrer strips Referer from our own form posts and Chromium suppresses
+    Origin with it, so the origin check saw neither and refused every genuine
+    approval. Same-origin keeps the header for our forms and still sends
+    nothing cross-origin.
+    """
+
+    def test_a_referer_only_same_origin_post_is_accepted(self, client, link, sent):
+        token, raw = link
+        nonce, signature = portal_service.issue_submission_nonce(token)
+        response = client.post(
+            f"/quote/public/{raw}/approve",
+            data={"customer_name": "Dana Whitfield", "accepted_terms": "on",
+                  "nonce": nonce, "signature": signature},
+            headers={"referer": "http://testserver/quote/public/x"},
+        )
+        assert response.status_code == 200
+        assert sent.status is QuotationStatus.ACCEPTED
+
+    def test_the_policy_still_withholds_the_url_cross_origin(self, client, link):
+        _, raw = link
+        headers = client.get(f"/quote/public/{raw}").headers
+        # same-origin sends nothing to another site, which is what protects the
+        # capability URL.
+        assert headers["referrer-policy"] == "same-origin"
