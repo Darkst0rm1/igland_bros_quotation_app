@@ -41,9 +41,26 @@ from modules.calculation_engine import (
     q_money,
 )
 from modules.constants import SELECTABLE_INCLUSIONS, ItemInclusion
-from modules.models import Quotation, QuotationItem
+from modules.models import PortalResponse, Quotation, QuotationItem
 
 ZERO = Decimal("0")
+
+#: The three figures, and the only wording any surface may use for them. A
+#: quotation with optional lines has three legitimate totals, and the whole
+#: point of separating them is lost if one of them is ever labelled "Total".
+BASE_LABEL = "Base Total"
+ALL_OPTIONS_LABEL = "Total with All Options"
+ACCEPTED_LABEL = "Accepted Total"
+
+BASE_HELP = "Included items only. What the customer owes if they select nothing."
+ALL_OPTIONS_HELP = (
+    "Included items plus every optional and recommended item. Derived on "
+    "demand, never stored, and never what the customer is being offered at."
+)
+ACCEPTED_HELP = (
+    "What the customer actually accepted: included items plus exactly the "
+    "options they chose. Recorded at acceptance and never recalculated."
+)
 
 
 class PriceScope(StrEnum):
@@ -241,3 +258,70 @@ def all_options(quotation: Quotation) -> PricingSnapshot:
 def selected(quotation: Quotation, selected_ids: list[int] | None) -> PricingSnapshot:
     """What a customer's current choices come to."""
     return price(quotation, PriceScope.SELECTED, selected_ids)
+
+
+# --------------------------------------------------------------------------- #
+# What an employee screen shows
+# --------------------------------------------------------------------------- #
+
+@dataclass(frozen=True)
+class TotalsRow:
+    """One labelled figure, ready to render. Money is still Decimal."""
+
+    label: str
+    amount: Decimal
+    currency: str
+    help_text: str
+    #: The figure the eye should land on. Exactly one row is primary.
+    is_primary: bool = False
+
+
+def totals_summary(
+    quotation: Quotation,
+    accepted_response: PortalResponse | None = None,
+) -> tuple[TotalsRow, ...]:
+    """The figures an employee screen shows for one quotation.
+
+    Lives here rather than in a page so the labels are one string each and can
+    be asserted. A page that built its own would eventually call one of these
+    "Total", which is the confusion the three scopes exist to prevent.
+
+    Before acceptance the base total leads, because that is the offer. After
+    acceptance the accepted total leads and the other two stay visible as
+    context — an employee still needs to see what was left on the table, but
+    not in a position where it could be read as the amount owed.
+    """
+    base_snapshot = base(quotation)
+    ceiling = all_options(quotation)
+
+    rows = [
+        TotalsRow(
+            label=BASE_LABEL,
+            amount=base_snapshot.grand_total,
+            currency=base_snapshot.currency,
+            help_text=BASE_HELP,
+            is_primary=accepted_response is None,
+        ),
+        TotalsRow(
+            label=ALL_OPTIONS_LABEL,
+            amount=ceiling.grand_total,
+            currency=ceiling.currency,
+            help_text=ALL_OPTIONS_HELP,
+        ),
+    ]
+
+    if accepted_response is not None:
+        # Read straight off the response. Not recomputed from the quotation:
+        # that is the whole guarantee, and recomputing it here would quietly
+        # restate an agreement whenever a later revision changed a price.
+        rows.insert(
+            0,
+            TotalsRow(
+                label=ACCEPTED_LABEL,
+                amount=accepted_response.grand_total,
+                currency=accepted_response.currency,
+                help_text=ACCEPTED_HELP,
+                is_primary=True,
+            ),
+        )
+    return tuple(rows)

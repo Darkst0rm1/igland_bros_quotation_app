@@ -32,18 +32,11 @@ from sqlalchemy.orm import Session
 from modules import quotation_service
 from modules.audit_service import record_audit
 from modules.authorization import AuthUser, require
-from modules.calculation_engine import (
-    ChargeInput,
-    LineInput,
-    QuotationTotals,
-    compute_line,
-    compute_totals,
-)
+from modules.calculation_engine import QuotationTotals
 from modules.config import get_settings
 from modules.constants import (
     AuditAction,
     EntityType,
-    ItemInclusion,
     Perm,
     PortalResponseType,
     QuotationStatus,
@@ -226,6 +219,33 @@ def record_view(session: Session, token: QuoteAccessToken) -> None:
     _record_event(session, token.quotation_id, QuoteEventType.VIEWED, token.id)
 
 
+def record_download(
+    session: Session,
+    token: QuoteAccessToken | None,
+    *,
+    accepted: bool,
+    quotation: Quotation | None = None,
+) -> None:
+    """Note that a PDF was taken. Deliberately **not** a view.
+
+    ``view_count`` and ``first_viewed_at`` are left alone: a customer who
+    downloads without opening the page has not viewed it, and counting it as
+    one would make "first viewed" a worse answer to the only question anybody
+    asks of it. The selection is not recorded either — it was temporary, and
+    persisting it would turn a read into a write.
+    """
+    quotation_id = token.quotation_id if token is not None else (
+        quotation.id if quotation is not None else None
+    )
+    if quotation_id is None:
+        return
+    _record_event(
+        session, quotation_id, QuoteEventType.PDF_DOWNLOADED,
+        token.id if token is not None else None,
+        detail={"kind": "accepted" if accepted else "draft"},
+    )
+
+
 def _record_event(
     session: Session,
     quotation_id: int,
@@ -275,25 +295,103 @@ def verify_submission_nonce(token: QuoteAccessToken, nonce: str, signature: str)
 
 
 # --------------------------------------------------------------------------- #
+# The download capability
+# --------------------------------------------------------------------------- #
+
+#: Names the purpose inside the signed payload. A signature is only ever valid
+#: for the thing it was issued for, so a capability to read cannot become a
+#: capability to act.
+DOWNLOAD_PURPOSE = "download"
+
+#: Short, but long enough to survive a customer reading the page before
+#: clicking. Downloading is read-only and idempotent, so the nonce may be used
+#: more than once inside the window — unlike a submission nonce, whose whole
+#: job is to be spent exactly once.
+DOWNLOAD_NONCE_TTL_SECONDS = 30 * 60
+
+
+def issue_download_nonce(
+    token: QuoteAccessToken,
+    quotation: Quotation,
+    *,
+    now: dt.datetime | None = None,
+) -> tuple[str, str]:
+    """Return ``(nonce, signature)`` for a PDF download of this exact revision.
+
+    Bound to four things, all inside the signed payload: the purpose, this
+    token, the revision on screen, and an expiry. Changing any of them changes
+    the signature, so a nonce issued for one quotation is meaningless against
+    another, and one issued for a revision the customer has since been sent a
+    replacement for stops working.
+    """
+    now = now or dt.datetime.now(dt.UTC)
+    expires = int((now + dt.timedelta(seconds=DOWNLOAD_NONCE_TTL_SECONDS)).timestamp())
+    nonce = f"{DOWNLOAD_PURPOSE}.{quotation.revision_no}.{expires}.{secrets.token_hex(8)}"
+    return nonce, _sign_purpose_nonce(token.token_hash, nonce)
+
+
+def _sign_purpose_nonce(token_hash: str, nonce: str) -> str:
+    """Sign a purpose-bearing nonce.
+
+    A deliberately different message shape from :func:`_sign_nonce`. The two
+    cannot collide, so a download signature presented to the approval path
+    fails to verify and vice versa — the separation is arithmetic, not a check
+    somebody has to remember to write.
+    """
+    secret = get_settings().secret_key.encode("utf-8")
+    message = f"purpose:{token_hash}:{nonce}".encode("utf-8")
+    return hmac.new(secret, message, hashlib.sha256).hexdigest()
+
+
+def verify_download_nonce(
+    token: QuoteAccessToken,
+    quotation: Quotation,
+    nonce: str,
+    signature: str,
+    *,
+    now: dt.datetime | None = None,
+) -> None:
+    """Raise unless this nonce authorises a download of this revision, now.
+
+    Every rejection raises the same error with the same wording: which of the
+    four bindings failed is not something a caller needs and not something a
+    prober should learn.
+    """
+    refusal = PortalError(
+        "This download link has expired. Please reload the page and try again."
+    )
+    if not nonce or not signature:
+        raise refusal
+
+    parts = nonce.split(".")
+    if len(parts) != 4:
+        raise refusal
+    purpose, revision, expires, _random = parts
+
+    if purpose != DOWNLOAD_PURPOSE:
+        raise refusal
+
+    # Verify the signature before trusting any field parsed out of the nonce.
+    expected = _sign_purpose_nonce(token.token_hash, nonce)
+    if not hmac.compare_digest(expected, signature):
+        raise refusal
+
+    try:
+        if int(revision) != quotation.revision_no:
+            raise refusal
+        if int(expires) <= (now or dt.datetime.now(dt.UTC)).timestamp():
+            raise refusal
+    except ValueError:
+        raise refusal from None
+
+
+# --------------------------------------------------------------------------- #
 # Selections and money
 # --------------------------------------------------------------------------- #
 
 def selectable_items(quotation: Quotation) -> list[QuotationItem]:
     """Lines the customer may add. Included lines are not negotiable."""
     return [i for i in quotation.items if i.inclusion in SELECTABLE_INCLUSIONS]
-
-
-def _line_input(item: QuotationItem) -> LineInput:
-    return LineInput(
-        quantity_packs=item.quantity_packs,
-        quantity_pieces=item.quantity_pieces,
-        case_pack=item.case_pack or 1,
-        price_per_pack=item.price_per_pack,
-        price_per_piece=item.price_per_piece,
-        pricing_basis=item.pricing_basis,
-        line_discount_pct=item.line_discount_pct,
-        line_discount_amount=item.line_discount_amount or None,
-    )
 
 
 def normalise_selection(
@@ -501,6 +599,14 @@ def approve(
     )
     session.add(response)
     session.flush()   # unique indexes decide the race here
+
+    # The document this acceptance owes, recorded in the same transaction. It
+    # commits with the acceptance or not at all, so an accepted quotation
+    # always has a job — but producing the PDF happens afterwards, and the
+    # customer never waits for a renderer or an object store to be reachable.
+    from modules import quote_document_service
+
+    quote_document_service.enqueue(session, response)
 
     # The accepted revision becomes immutable; further changes need a revision.
     quotation.is_locked = True

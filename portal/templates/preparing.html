@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Preparing your document{% endblock %}
+
+{#
+  Shown when the accepted PDF has not been produced yet, or when the stored one
+  failed its integrity check. Both say the same thing to the customer, because
+  the difference is ours to deal with and the action they can take is the same.
+
+  What this page deliberately does not do is offer an on-demand replacement. An
+  accepted quotation has exactly one official document; anything generated here
+  to fill the gap would look official and would not be the one that was agreed.
+#}
+
+{% block body %}
+<main id="main" class="centred">
+  <div class="card notice">
+    <h1>Your document is being prepared</h1>
+    <p>Your acceptance has been recorded. The signed copy is still being
+       produced — this usually takes a moment.</p>
+    <p class="muted">Please try again shortly. If it is still not ready,
+       contact your representative{% if support_email %} at
+       <a href="mailto:{{ support_email }}">{{ support_email }}</a>{% endif %}
+       and we will send it to you directly.</p>
+  </div>
+</main>
+{% endblock %}

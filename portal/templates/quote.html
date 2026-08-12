@@ -44,6 +44,14 @@
           {{ quote.accepted.accepted_at.strftime("%d %b %Y") }} at
           {{ quote.accepted.grand_total | money(quote.accepted.currency) }}.
         </span>
+        {#
+          The signature is confirmed, never shown. Anyone holding the link can
+          read this page; the signature itself belongs only in the PDF, which
+          is served over the validated download route.
+        #}
+        {% if quote.accepted.signature_name %}
+          <span class="signature-recorded">&#10003; Signature recorded</span>
+        {% endif %}
         <span class="muted">This quotation is now read-only. Any change
           requires a new quotation.</span>
       </div>
@@ -286,6 +294,31 @@
         <a class="btn secondary wide" href="#respond">Request changes</a>
       {% else %}
         <p class="muted small">This quotation is read-only.</p>
+      {% endif %}
+
+      {#
+        Only rendered when pressing it works. For a live quotation that is
+        always; for an accepted one only once the immutable document exists —
+        a button that returns "not ready" is worse than no button.
+
+        The selection is mirrored as hidden fields, the same way the approval
+        form does it, so the PDF matches the total shown above. The server
+        reprices from these references regardless; they say which lines, never
+        what they cost.
+      #}
+      {% if can_download %}
+        <form method="post" action="/quote/public/{{ token }}/download.pdf"
+              class="download-form">
+          <input type="hidden" name="nonce" value="{{ download_nonce }}">
+          <input type="hidden" name="signature" value="{{ download_signature }}">
+          {% for ref in quote.selected_refs %}
+            <input type="hidden" name="selected" value="{{ ref }}">
+          {% endfor %}
+          <button type="submit" class="btn secondary wide">Download PDF</button>
+        </form>
+      {% elif document_pending %}
+        <p class="muted small">Your signed copy is being prepared. Please check
+          back shortly.</p>
       {% endif %}
     </div>
   </aside>

@@ -24,10 +24,17 @@ import pandas as pd
 import streamlit as st
 from sqlalchemy import select
 
-from modules import portal_readiness, portal_service, quotation_service
+from modules import (
+    portal_readiness,
+    portal_service,
+    pricing_snapshot,
+    quotation_service,
+    quote_document_service,
+)
 from modules.authorization import PermissionDenied, quotation_scope_filter
 from modules.config import get_settings
 from modules.constants import (
+    DOCUMENT_JOB_DISPLAY_NAMES,
     INCLUSION_DISPLAY_NAMES,
     ItemInclusion,
     Perm,
@@ -155,10 +162,39 @@ with session_scope() as db:
     ]
     current_deposit = quotation.deposit_pct
 
+    # Three figures, three names. The all-options amount is derived here and
+    # never stored — a stored copy would be one more thing to drift out of step
+    # with the lines it is supposed to summarise.
+    accepted_response = next(
+        (
+            r for r in sorted(quotation.portal_responses, key=lambda r: r.submitted_at)
+            if r.response_type is PortalResponseType.APPROVED
+        ),
+        None,
+    )
+    totals_rows = [
+        {
+            "label": row.label,
+            "amount": format_money(row.amount, row.currency),
+            "help": row.help_text,
+            "primary": row.is_primary,
+        }
+        for row in pricing_snapshot.totals_summary(quotation, accepted_response)
+    ]
+
 st.dataframe(
     pd.DataFrame([{k: v for k, v in r.items() if not k.startswith("_")} for r in item_rows]),
     width="stretch", hide_index=True,
 )
+
+for column, row in zip(st.columns(len(totals_rows)), totals_rows, strict=True):
+    with column:
+        # st.metric rather than markdown: the label sits above the figure and
+        # cannot be read as part of it, which is the failure mode being guarded
+        # against — an amount whose meaning is ambiguous.
+        column.metric(row["label"], row["amount"], help=row["help"])
+        if row["primary"]:
+            st.caption("Primary amount")
 
 if not is_accepted and user.has(Perm.QUOTE_EDIT_OWN_DRAFT):
     edit_col, deposit_col = st.columns([2, 1])
@@ -395,6 +431,7 @@ else:
         ).scalars().all()
         detail = [
             {
+                "id": r.id,
                 "type": r.response_type,
                 "name": r.customer_name,
                 "title": r.job_title or "-",
@@ -405,6 +442,12 @@ else:
                 "total": format_money(r.grand_total, r.currency),
                 "at": format_datetime(r.submitted_at),
                 "selected": list(r.selected_item_ids or []),
+                "document_status": quote_document_service.state_for_response(
+                    db, r.id
+                ).status,
+                "document_retryable": quote_document_service.state_for_response(
+                    db, r.id
+                ).is_retryable,
             }
             for r in responses
         ]
@@ -442,6 +485,28 @@ else:
                         + (", ".join(chosen) if chosen else "none")
                     )
                 )
+                # The signed PDF's state, and only its state. The reason a job
+                # failed is diagnostic detail that helps nobody on this page and
+                # would put internal error text in front of a salesperson.
+                doc_col, retry_col = st.columns([3, 1])
+                with doc_col:
+                    st.caption("Signed copy")
+                    st.markdown(
+                        f"**{DOCUMENT_JOB_DISPLAY_NAMES[entry['document_status']]}**"
+                    )
+                with retry_col:
+                    if (
+                        entry["document_retryable"]
+                        and user.has(Perm.QUOTE_PORTAL_LINK_ISSUE)
+                        and st.button("Try again", key=f"retry_doc_{entry['id']}")
+                    ):
+                        with session_scope() as db:
+                            quote_document_service.retry(db, entry["id"])
+                        quote_document_service.run_pending_jobs(
+                            limit=1, response_id=entry["id"]
+                        )
+                        st.toast("Preparing the signed copy", icon="📄")
+                        st.rerun()
             if entry["comment"]:
                 st.markdown(escape_markdown(f"Comment: {entry['comment']}"))
 

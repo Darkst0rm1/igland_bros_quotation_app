@@ -23,6 +23,7 @@ from modules import (
     portal_readiness,
     portal_service,
     pricing_service,
+    pricing_snapshot,
     quotation_service,
     revision_service,
     settings_service,
@@ -49,6 +50,7 @@ from modules.constants import (
     Incoterm,
     LoadingMethod,
     Perm,
+    PortalResponseType,
     PricingBasis,
     QuotationStatus,
     SendMethod,
@@ -1638,6 +1640,22 @@ with review_tab:
                 sorted(quote.portal_responses, key=lambda r: r.submitted_at)[-1]
                 if quote.portal_responses else None
             )
+            accepted_response = next(
+                (
+                    r for r in sorted(quote.portal_responses, key=lambda r: r.submitted_at)
+                    if r.response_type is PortalResponseType.APPROVED
+                ),
+                None,
+            )
+            totals_rows = [
+                {
+                    "label": row.label,
+                    "amount": format_money(row.amount, row.currency),
+                    "help": row.help_text,
+                    "primary": row.is_primary,
+                }
+                for row in pricing_snapshot.totals_summary(quote, accepted_response)
+            ]
             portal_summary = {
                 "status": STATUS_DISPLAY_NAMES.get(quote.status, str(quote.status)),
                 "deposit_pct": quote.deposit_pct,
@@ -1654,6 +1672,12 @@ with review_tab:
                     if latest_response else ""
                 ),
             }
+
+        # The three totals first: an employee reading this section is usually
+        # answering "what is this worth", and the answer depends entirely on
+        # which of the three is meant.
+        for column, row in zip(st.columns(len(totals_rows)), totals_rows, strict=True):
+            column.metric(row["label"], row["amount"], help=row["help"])
 
         col_status, col_config, col_link = st.columns(3)
         with col_status:

@@ -43,6 +43,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
 
 from modules.constants import (
     AddressType,
+    ArtifactStatus,
     ContainerSize,
     ContainerType,
     FreightMethod,
@@ -52,6 +53,7 @@ from modules.constants import (
     ChargeType,
     CustomerResponse,
     CustomerStatus,
+    DocumentJobStatus,
     ImportJobStatus,
     ImportRowAction,
     ImportRowStatus,
@@ -1243,6 +1245,109 @@ class PortalResponse(Base):
     )
 
 
+class QuoteDocumentArtifact(Base):
+    """The one final PDF of one accepted quotation.
+
+    Immutable by policy and by guard: once a row exists, the bytes it describes
+    are what the customer accepted, and neither the key, the hash nor the size
+    may be rewritten. Regenerating is not a thing that happens — if the stored
+    object stops matching, the row is quarantined and investigated, because a
+    silently regenerated "accepted" document is a rewritten agreement.
+
+    ``storage_key`` is derived from the accepted response's own identity, never
+    from anything a customer supplied, so a retry lands on the same object and
+    can adopt bytes an earlier attempt already wrote instead of duplicating
+    them. No public URL is ever derived from it; retrieval goes through the
+    validated portal route, which verifies hash and size first.
+    """
+
+    __tablename__ = "quote_document_artifacts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: Unique: one accepted response has exactly one final document.
+    portal_response_id: Mapped[int] = mapped_column(
+        ForeignKey("portal_responses.id", ondelete="CASCADE"),
+        nullable=False, unique=True,
+    )
+    quotation_id: Mapped[int] = mapped_column(
+        ForeignKey("quotations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    #: The revision that was accepted, carried here too so the artifact can be
+    #: matched to it without loading the response.
+    revision_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    storage_key: Mapped[str] = mapped_column(String(500), nullable=False, unique=True)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    generated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        default=lambda: dt.datetime.now(dt.UTC),
+    )
+    #: Which template produced these bytes, so an artifact made by an older
+    #: renderer is identifiable rather than assumed current.
+    generator_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    status: Mapped[ArtifactStatus] = mapped_column(
+        _enum(ArtifactStatus), nullable=False, default=ArtifactStatus.READY
+    )
+    #: Set only when quarantined. Internal; never shown to a customer.
+    quarantine_reason: Mapped[str | None] = mapped_column(Text)
+
+    response: Mapped[PortalResponse] = relationship()
+
+
+class QuoteDocumentJob(Base):
+    """The durable intent to produce one accepted PDF.
+
+    Written in the same transaction as the acceptance, so an accepted quotation
+    always has a job even if the renderer or object storage is down at that
+    moment. Acceptance never waits for it and never fails because of it: the
+    customer's decision is the business event, and the PDF is a consequence.
+
+    Bounded: after ``MAX_ATTEMPTS`` the job stops retrying and asks for a human,
+    rather than hammering a broken backend forever.
+    """
+
+    __tablename__ = "quote_document_jobs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: Unique, so enqueueing twice for the same acceptance is a no-op rather
+    #: than two workers producing two documents.
+    portal_response_id: Mapped[int] = mapped_column(
+        ForeignKey("portal_responses.id", ondelete="CASCADE"),
+        nullable=False, unique=True,
+    )
+    quotation_id: Mapped[int] = mapped_column(
+        ForeignKey("quotations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    revision_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    status: Mapped[DocumentJobStatus] = mapped_column(
+        _enum(DocumentJobStatus), nullable=False,
+        default=DocumentJobStatus.PENDING, index=True,
+    )
+    attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    #: Internal diagnostics. Never rendered to an employee or a customer.
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+    #: A short lease, so two workers do not render the same document at once.
+    #: The unique index on the artifact is the hard guarantee; this is what
+    #: stops the wasted work and the racing writes that would need it.
+    lock_owner: Mapped[str | None] = mapped_column(String(64))
+    locked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        default=lambda: dt.datetime.now(dt.UTC),
+    )
+    last_attempt_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    response: Mapped[PortalResponse] = relationship()
+
+
 class StorageCleanup(Base):
     """An object that should be deleted, once the database says it is safe to.
 
@@ -1724,6 +1829,12 @@ _COST_IMMUTABLE_FIELDS = frozenset({
     "effective_from",
 })
 
+#: An accepted document's identity and contents never change. What stays
+#: writable is only the verdict on it: quarantining a row whose object no
+#: longer matches, and the note saying why. Regeneration is deliberately not
+#: possible — a rewritten "accepted" PDF is a rewritten agreement.
+_ARTIFACT_WRITABLE = frozenset({"status", "quarantine_reason"})
+
 
 def _changed_fields(session: Any, obj: Any) -> set[str]:
     """Names of attributes with a pending change on ``obj``."""
@@ -1781,6 +1892,15 @@ def _guard_immutability(session: Session, _flush_context: Any, _instances: Any) 
             raise ImmutableRecordError(
                 f"Revision snapshot #{obj.id} is immutable and cannot be edited."
             )
+
+        elif isinstance(obj, QuoteDocumentArtifact):
+            illegal = _changed_fields(session, obj) - _ARTIFACT_WRITABLE
+            if illegal:
+                raise ImmutableRecordError(
+                    f"Accepted document #{obj.id} records what a customer agreed "
+                    f"to and cannot be rewritten ({', '.join(sorted(illegal))}). "
+                    "Quarantine it instead."
+                )
 
         elif isinstance(obj, QuotationShipment):
             parent = obj.quotation

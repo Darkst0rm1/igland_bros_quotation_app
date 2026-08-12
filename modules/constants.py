@@ -655,6 +655,40 @@ class PortalResponseType(StrEnum):
     CHANGES_REQUESTED = "CHANGES_REQUESTED"
 
 
+class DocumentJobStatus(StrEnum):
+    """How the accepted-PDF job for one acceptance is getting on.
+
+    Three states because three is what an employee needs to act: it is coming,
+    it is here, or it needs somebody. The reason a job failed is recorded but
+    is not one of these — an employee is told the state, never the internals.
+    """
+
+    PENDING = "PENDING"
+    READY = "READY"
+    FAILED = "FAILED"
+
+
+class ArtifactStatus(StrEnum):
+    """Whether stored bytes may still be served.
+
+    ``QUARANTINED`` is set when the stored object stops matching the hash and
+    size recorded when it was written. The row is never deleted and never
+    overwritten: it is the evidence that something changed bytes that were
+    supposed to be immutable, and it must survive to be investigated.
+    """
+
+    READY = "READY"
+    QUARANTINED = "QUARANTINED"
+
+
+#: How employees see a job state. Deliberately plain, with no error detail.
+DOCUMENT_JOB_DISPLAY_NAMES: dict[DocumentJobStatus, str] = {
+    DocumentJobStatus.PENDING: "Preparing",
+    DocumentJobStatus.READY: "Ready",
+    DocumentJobStatus.FAILED: "Needs attention",
+}
+
+
 class SendMethod(StrEnum):
     EMAIL = "EMAIL"
     COURIER = "COURIER"

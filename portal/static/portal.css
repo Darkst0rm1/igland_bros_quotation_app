@@ -149,6 +149,12 @@ tr.not-included td { opacity: .62; }
 }
 .banner.accepted { background: var(--ok-bg); color: var(--ok-ink); }
 .banner.expired { background: var(--warn-bg); color: var(--warn-ink); }
+/* Confirms a signature exists without reproducing it: this page is readable by
+   anyone holding the link, and the signature belongs only in the PDF. */
+.signature-recorded { font-weight: 700; }
+
+.download-form { margin-top: 10px; }
+.download-form .btn { margin: 0; }
 .alert {
   background: var(--alert-bg); color: var(--alert-ink); padding: 12px 16px;
   border-radius: var(--radius); margin: 0 0 20px;

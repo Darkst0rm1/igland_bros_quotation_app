@@ -14,6 +14,7 @@ consent banner for.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import pathlib
 from decimal import Decimal
@@ -25,9 +26,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from modules import portal_service, settings_service
+from modules import portal_service, quote_document_service, settings_service
 from modules.config import get_settings
 from modules.database import session_scope
 from modules.models import PortalResponse, Quotation, User
@@ -37,6 +39,8 @@ from modules.portal_service import (
     PortalError,
     PortalStateError,
 )
+from modules.quote_document_service import ArtifactIntegrityError
+from modules.storage import safe_filename
 from modules.utilities import format_money
 from portal import assets, projection
 from portal.branding import resolve_brand, validate_portal_settings
@@ -98,6 +102,14 @@ _settings = get_settings()
 validate_portal_settings(_settings)
 _view_limiter = RateLimiter(limit=_settings.portal_view_rate_per_minute, window_seconds=60)
 _submit_limiter = RateLimiter(limit=_settings.portal_submit_rate_per_hour, window_seconds=3600)
+# Downloads get their own budget: rendering a PDF costs far more than serving a
+# page, so the view allowance would be far too generous for it.
+_download_limiter = RateLimiter(limit=12, window_seconds=300)
+
+#: A render that has not finished in this long is abandoned and the request
+#: answered with the generic error. The work is also bounded at the input by
+#: portal.pdf_model.MAX_LINES, so this is a backstop rather than the only limit.
+PDF_TIMEOUT_SECONDS = 20
 
 
 # --------------------------------------------------------------------------- #
@@ -156,6 +168,24 @@ def _render_quote(
         sales_representative=_sales_rep_name(session, quotation),
     )
     nonce, signature = portal_service.issue_submission_nonce(token)
+    # A separate capability, and a separate signature. The approval nonce is
+    # spent once; this one may be reused while it lasts, because downloading
+    # changes nothing.
+    download_nonce, download_signature = portal_service.issue_download_nonce(
+        token, quotation
+    )
+
+    # The button only appears when pressing it would work. For a live quotation
+    # that is always; for an accepted one it depends on whether the immutable
+    # document has been produced yet.
+    if accepted is None:
+        can_download = True
+        document_pending = False
+    else:
+        state = quote_document_service.state_for_response(session, accepted.id)
+        can_download = state.is_ready
+        document_pending = not state.is_ready
+
     return TEMPLATES.TemplateResponse(
         request=request, name="quote.html", status_code=status_code,
         context={
@@ -163,6 +193,10 @@ def _render_quote(
             "brand": resolve_brand(_settings, settings_service.get_company_settings(session)),
             "nonce": nonce,
             "signature": signature,
+            "download_nonce": download_nonce,
+            "download_signature": download_signature,
+            "can_download": can_download,
+            "document_pending": document_pending,
             "error": error,
             # The plaintext token stays in the URL and in this form action for
             # the lifetime of the request. It is never written to a title, a
@@ -298,7 +332,8 @@ async def approve_quote(
             session.rollback()
             return _not_found(request, status_code=409)
 
-        return TEMPLATES.TemplateResponse(
+        response_id = response.id
+        confirmation = TEMPLATES.TemplateResponse(
             request=request, name="confirmation.html",
             context={
                 "heading": "Quotation accepted",
@@ -312,6 +347,16 @@ async def approve_quote(
                 "currency": response.currency,
             },
         )
+
+    # Outside the session block, so the acceptance has committed before the PDF
+    # is attempted — and attached as a background task, so it runs after this
+    # response has been delivered. The customer's confirmation never waits for
+    # a renderer, and a renderer that fails leaves the quotation accepted and
+    # the job queued.
+    confirmation.background = BackgroundTask(
+        quote_document_service.run_pending_jobs, limit=1, response_id=response_id
+    )
+    return confirmation
 
 
 @app.post("/quote/public/{token}/request-changes", response_class=HTMLResponse)
@@ -368,6 +413,158 @@ async def request_changes(
                 "currency": "",
             },
         )
+
+
+@app.post("/quote/public/{token}/download.pdf")
+async def download_pdf(
+    request: Request,
+    token: str,
+    nonce: Annotated[str, Form()] = "",
+    signature: Annotated[str, Form()] = "",
+    selected: Annotated[list[str], Form()] = [],
+) -> Response:
+    """The customer's copy, priced server-side.
+
+    A POST because it carries the selection, not because it changes anything:
+    nothing is persisted, no view is recorded and the customer's ticks are used
+    for this response only. The submitted references say *which* lines to
+    include and never what they cost — every figure is recalculated here
+    through :mod:`modules.pricing_snapshot`, the same code the page and the
+    employee screens use.
+
+    An accepted quotation ignores the form entirely and serves the immutable
+    artifact instead. What was agreed is not re-derived from anything a browser
+    sends afterwards.
+    """
+    if not _download_limiter.allow(client_fingerprint(request, _settings.secret_key)):
+        return _too_many(request)
+
+    with session_scope() as session:
+        try:
+            access = portal_service.resolve_token(session, token)
+        except PortalAccessError:
+            return _not_found(request)
+
+        quotation = session.get(Quotation, access.quotation_id)
+
+        try:
+            # Purpose, token, revision and expiry, all inside one signature.
+            portal_service.verify_download_nonce(access, quotation, nonce, signature)
+        except PortalError:
+            return _not_found(request, status_code=403)
+
+        accepted = _accepted_response(session, quotation)
+        if accepted is not None:
+            return _accepted_artifact_response(request, session, quotation, accepted)
+
+        chosen = projection.resolve_refs(access, quotation, selected)
+        try:
+            data, filename = await _render_draft(session, quotation, chosen)
+        except (TimeoutError, asyncio.TimeoutError):
+            log.warning("Customer PDF render exceeded its budget; refusing")
+            return _not_found(request, status_code=503)
+        except Exception:  # noqa: BLE001 — the customer gets one generic answer
+            log.exception("Customer PDF could not be produced")
+            return _not_found(request, status_code=500)
+
+        # Not a view: a download is its own event, so "first viewed" keeps
+        # meaning what it says and the view count is not inflated by it.
+        portal_service.record_download(session, access, accepted=False)
+
+    return _pdf_response(data, filename)
+
+
+async def _render_draft(session, quotation: Quotation, chosen: list[int]):  # noqa: ANN001
+    """Build and render the draft, bounded by a wall-clock budget.
+
+    Run off the event loop so a slow document cannot stall every other request,
+    and abandoned if it overruns. The input is bounded separately, at
+    ``pdf_model.MAX_LINES`` — a timeout releases the request but not the thread,
+    so it cannot be the only limit.
+    """
+    from modules import pricing_snapshot
+    from portal import pdf_model, pdf_renderer
+
+    snapshot = pricing_snapshot.selected(quotation, chosen)
+    company = settings_service.get_company_settings(session)
+    document = pdf_model.build_draft(
+        quotation, snapshot,
+        company_settings=company,
+        logo_bytes=quote_document_service._logo_bytes(company),
+        sales_representative=_sales_rep_name(session, quotation),
+        legal_footer=(company.pdf_confidentiality_text or "") if company else "",
+        thank_you_text=(company.pdf_thank_you_text or "") if company else "",
+    )
+
+    loop = asyncio.get_running_loop()
+    data = await asyncio.wait_for(
+        loop.run_in_executor(None, pdf_renderer.render, document),
+        timeout=PDF_TIMEOUT_SECONDS,
+    )
+    return data, f"{document.file_stem}.pdf"
+
+
+def _accepted_artifact_response(
+    request: Request, session, quotation: Quotation, accepted: PortalResponse
+) -> Response:
+    """Serve the immutable accepted document, or explain that it is coming.
+
+    Never renders one on demand. An accepted quotation has exactly one official
+    document; producing a fresh one here would hand the customer something that
+    looks official and was never the artifact anybody agreed to.
+    """
+    state = quote_document_service.state_for_response(session, accepted.id)
+    if not state.is_ready:
+        return _preparing(request)
+
+    artifact = quote_document_service.artifact_for_response(session, accepted.id)
+    try:
+        # Hash and size are checked before a single byte is returned.
+        data = quote_document_service.verify(session, artifact)
+    except ArtifactIntegrityError:
+        # The quarantine mark is applied inside verify() and commits with this
+        # request. The customer is told nothing about why.
+        log.error("Refusing to serve an accepted document that failed verification")
+        return _preparing(request)
+
+    portal_service.record_download(session, None, accepted=True, quotation=quotation)
+
+    revision = f"Rev{accepted.revision_no}"
+    stem = safe_filename(f"{quotation.quote_number}_{revision}_Accepted.pdf")
+    return _pdf_response(data, stem)
+
+
+def _preparing(request: Request) -> HTMLResponse:
+    """"It is coming, try again shortly" — never an improvised replacement."""
+    return TEMPLATES.TemplateResponse(
+        request=request, name="preparing.html", status_code=202,
+        context={"support_email": _settings.portal_support_email},
+    )
+
+
+def _pdf_response(data: bytes, filename: str) -> Response:
+    """The bytes, with headers that make a browser save rather than render them."""
+    clean = safe_filename(filename)
+    if not clean.lower().endswith(".pdf"):
+        clean = f"{clean}.pdf"
+    return Response(
+        content=data,
+        media_type="application/pdf",
+        headers={
+            # Attachment, not inline: a PDF rendered in the tab keeps the
+            # capability URL on screen and in the history of whoever it is
+            # forwarded to.
+            "Content-Disposition": f'attachment; filename="{clean}"',
+            "Content-Length": str(len(data)),
+            "Cache-Control": "no-store, private",
+        },
+    )
+
+
+@app.get("/quote/public/{token}/download.pdf")
+async def no_download_via_get(request: Request, token: str) -> RedirectResponse:
+    """A bare GET has no nonce, so send them back to the page that mints one."""
+    return RedirectResponse(url=f"/quote/public/{token}", status_code=303)
 
 
 @app.get("/brand.css")
