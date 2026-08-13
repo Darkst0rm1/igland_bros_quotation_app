@@ -78,6 +78,19 @@ class Perm(StrEnum):
     QUOTE_PORTAL_LINK_REVOKE = "quote.portal_link_revoke"
     QUOTE_PORTAL_PREVIEW = "quote.portal_preview"
     QUOTE_PORTAL_VIEW_RESPONSE = "quote.portal_view_response"
+    #: Email a quotation to a customer. Separate from issuing a link, because
+    #: they are different acts: a link can be generated, previewed and thrown
+    #: away, while a sent message has left the building and cannot be recalled.
+    QUOTE_PORTAL_SEND = "quote.portal_send"
+    #: Push a failed delivery back into the queue. Narrower than sending — it
+    #: cannot change who receives it or what they receive — so a manager can
+    #: unstick a queue without gaining the ability to mail a customer something
+    #: new.
+    QUOTE_PORTAL_RETRY = "quote.portal_retry"
+    #: See what was sent, to whom and whether it arrived. Read-only, and granted
+    #: to Finance, who need to know a quotation reached the customer without
+    #: being able to send one.
+    QUOTE_PORTAL_VIEW_DELIVERY = "quote.portal_view_delivery"
 
     # Internal financials
     COST_VIEW = "cost.view"
@@ -137,6 +150,8 @@ PERMISSION_CATEGORIES: dict[Perm, str] = {
         Perm.QUOTE_EXPORT, Perm.QUOTE_DELETE_DRAFT, Perm.QUOTE_DELETE_ANY,
         Perm.QUOTE_PORTAL_LINK_ISSUE, Perm.QUOTE_PORTAL_LINK_REVOKE,
         Perm.QUOTE_PORTAL_PREVIEW, Perm.QUOTE_PORTAL_VIEW_RESPONSE,
+        Perm.QUOTE_PORTAL_SEND, Perm.QUOTE_PORTAL_RETRY,
+        Perm.QUOTE_PORTAL_VIEW_DELIVERY,
     )},
     **{p: "Internal financials" for p in (
         Perm.COST_VIEW, Perm.COST_MANAGE, Perm.MARGIN_VIEW,
@@ -176,6 +191,7 @@ ROLE_PERMISSIONS: dict[RoleCode, frozenset[Perm]] = {
         Perm.QUOTE_DELETE_DRAFT,
         Perm.QUOTE_PORTAL_LINK_ISSUE, Perm.QUOTE_PORTAL_LINK_REVOKE,
         Perm.QUOTE_PORTAL_PREVIEW, Perm.QUOTE_PORTAL_VIEW_RESPONSE,
+        Perm.QUOTE_PORTAL_SEND, Perm.QUOTE_PORTAL_VIEW_DELIVERY,
         Perm.CUSTOMER_VIEW, Perm.CUSTOMER_CREATE, Perm.CUSTOMER_EDIT,
         Perm.PRODUCT_VIEW, Perm.PRICE_VIEW,
         Perm.SHIPMENT_EDIT,
@@ -191,6 +207,8 @@ ROLE_PERMISSIONS: dict[RoleCode, frozenset[Perm]] = {
         Perm.QUOTE_EXPORT, Perm.QUOTE_DELETE_DRAFT,
         Perm.QUOTE_PORTAL_LINK_ISSUE, Perm.QUOTE_PORTAL_LINK_REVOKE,
         Perm.QUOTE_PORTAL_PREVIEW, Perm.QUOTE_PORTAL_VIEW_RESPONSE,
+        Perm.QUOTE_PORTAL_SEND, Perm.QUOTE_PORTAL_RETRY,
+        Perm.QUOTE_PORTAL_VIEW_DELIVERY,
         Perm.COST_VIEW, Perm.MARGIN_VIEW,
         Perm.CUSTOMER_VIEW, Perm.CUSTOMER_CREATE, Perm.CUSTOMER_EDIT, Perm.CUSTOMER_DELETE,
         Perm.PRODUCT_VIEW, Perm.PRICE_VIEW,
@@ -201,8 +219,9 @@ ROLE_PERMISSIONS: dict[RoleCode, frozenset[Perm]] = {
     }),
     RoleCode.FINANCE: frozenset({
         Perm.QUOTE_VIEW_OWN, Perm.QUOTE_VIEW_TEAM, Perm.QUOTE_VIEW_ALL,
-        # Read what a customer agreed to, but no ability to publish or revoke.
-        Perm.QUOTE_PORTAL_VIEW_RESPONSE,
+        # Read what a customer agreed to, and whether the quotation actually
+        # reached them — but no ability to publish, revoke, send or retry.
+        Perm.QUOTE_PORTAL_VIEW_RESPONSE, Perm.QUOTE_PORTAL_VIEW_DELIVERY,
         Perm.QUOTE_APPROVE_CUSTOM_PRICE, Perm.QUOTE_GENERATE_PDF, Perm.QUOTE_EXPORT,
         Perm.COST_VIEW, Perm.COST_MANAGE, Perm.MARGIN_VIEW,
         Perm.CUSTOMER_VIEW, Perm.CUSTOMER_CREATE, Perm.CUSTOMER_EDIT,
@@ -650,6 +669,13 @@ class QuoteEventType(StrEnum):
     EMAIL_QUEUED = "EMAIL_QUEUED"
     EMAIL_SENT = "EMAIL_SENT"
     EMAIL_FAILED = "EMAIL_FAILED"
+    #: An employee pushed a failed delivery back into the queue. Distinct from
+    #: EMAIL_RESENT: a retry sends the same message to the same person with the
+    #: same link, while a resend replaces the customer's way in.
+    EMAIL_RETRY_SCHEDULED = "EMAIL_RETRY_SCHEDULED"
+    #: A new link was issued and the previous one revoked. The customer's old
+    #: URL stops working at this point, which is why it is its own event.
+    EMAIL_RESENT = "EMAIL_RESENT"
     APPROVED = "APPROVED"
     CHANGES_REQUESTED = "CHANGES_REQUESTED"
     ACCESS_DENIED = "ACCESS_DENIED"

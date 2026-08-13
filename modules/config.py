@@ -201,6 +201,10 @@ class Settings(BaseSettings):
     worker_batch_size: int = Field(default=20, ge=1, le=500)
     #: How long a worker's claim on a row is honoured before another may take it.
     worker_lease_seconds: int = Field(default=300, ge=30, le=3600)
+    #: A health signal older than this is reported to employees as stale. Wider
+    #: than the poll interval on purpose: a worker that misses one sweep has not
+    #: stopped, and an indicator that cries wolf gets ignored.
+    worker_stale_after_seconds: int = Field(default=900, ge=60, le=86400)
 
     # --- Uploads ----------------------------------------------------------
     max_upload_mb: int = Field(default=10, ge=1, le=100)

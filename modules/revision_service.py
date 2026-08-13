@@ -546,6 +546,12 @@ def _copy_item(item: QuotationItem, quotation_id: int) -> QuotationItem:
         line_cost_total=item.line_cost_total,
         customer_remarks=item.customer_remarks,
         internal_remarks=item.internal_remarks,
+        # Whether a line is offered as included, optional or recommended is part
+        # of the offer, not a display setting. Omitting it here let every
+        # selectable line fall back to the INCLUDED default, so a revision of a
+        # quotation with optional extras silently charged for all of them — the
+        # total went up and no customer had chosen anything.
+        inclusion=item.inclusion,
     )
 
 

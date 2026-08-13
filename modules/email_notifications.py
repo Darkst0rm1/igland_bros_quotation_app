@@ -174,14 +174,25 @@ def queue_invitation(
     previous_revision_label: str = "",
     change_summary: str = "",
     discriminator: str = "",
+    recipient_email: str = "",
+    recipient_name: str = "",
 ) -> EmailOutbox | None:
     """Queue the message that carries the customer's link.
 
     Called at the moment a link is issued, because that is the only moment the
     plaintext exists. It is sealed immediately and the row is the only thing
     that survives the call.
+
+    ``recipient_email`` overrides the quotation's contact for this message
+    alone. It has to be supplied *here* rather than corrected afterwards: the
+    sealed payload is bound to the recipient, so a row re-pointed later would
+    hold a ciphertext that no longer opens. The customer master record is not
+    touched either way — an employee choosing a different address for one send
+    is not editing the customer.
     """
-    recipient, name = _customer_recipient(quotation)
+    default_recipient, default_name = _customer_recipient(quotation)
+    recipient = (recipient_email or default_recipient or "").strip()
+    name = (recipient_name or default_name or "").strip()
     if not recipient:
         raise OutboxError(
             "This quotation has no customer contact email, so an invitation "

@@ -30,12 +30,15 @@ from modules import (
     pricing_snapshot,
     quotation_service,
     quote_document_service,
+    quote_send_service,
 )
 from modules.authorization import PermissionDenied, quotation_scope_filter
 from modules.config import get_settings
 from modules.constants import (
     DOCUMENT_JOB_DISPLAY_NAMES,
+    EMAIL_MESSAGE_DISPLAY_NAMES,
     INCLUSION_DISPLAY_NAMES,
+    EmailMessageType,
     ItemInclusion,
     Perm,
     PortalResponseType,
@@ -49,6 +52,7 @@ from modules.models import (
     QuoteAccessToken,
     QuoteEvent,
 )
+from modules.quote_send_service import SendError
 from modules.session import page_header, require_page
 from modules.utilities import escape_markdown, format_date, format_datetime, format_money
 
@@ -278,6 +282,366 @@ if st.button("Show customer preview", key="portal_preview"):
     with right:
         st.metric("Optional items offered", len(selectable))
         st.caption("Excluded from the total above until the customer selects them.")
+
+
+# --------------------------------------------------------------------------- #
+# Send it to the customer
+# --------------------------------------------------------------------------- #
+# Three separate acts, deliberately: generate a link, preview the email, send
+# it. An employee configuring a quotation has to be able to look at both
+# without a customer receiving anything.
+
+st.divider()
+st.markdown("##### Send to customer")
+
+health = quote_send_service.worker_health()
+_HEALTH_ICON = {"Running": "🟢", "Degraded": "🟠"}
+
+# The outcome of the last send, carried across the rerun that refreshed the
+# history below.
+sent_result = st.session_state.pop("send_result", None)
+if sent_result:
+    st.success(
+        escape_markdown(
+            f"**{sent_result['headline']}.** {sent_result['revision']} to "
+            f"{sent_result['recipient']}."
+        )
+    )
+    st.caption(
+        "Queued, not sent. The delivery worker sends it on its next pass; the "
+        "status below will change to Sent."
+        + (
+            f" {sent_result['revoked']} previous link(s) were revoked."
+            if sent_result["revoked"] else ""
+        )
+    )
+
+if user.has(Perm.QUOTE_PORTAL_SEND):
+    with session_scope() as db:
+        quotation = db.get(Quotation, quote_id)
+        options = quote_send_service.recipient_options(db, quotation)
+        must_choose = quote_send_service.requires_explicit_choice(options)
+        current_revision_no = quotation.revision_no
+        current_revision_label = quotation.revision_label
+        base_total_display = format_money(
+            pricing_snapshot.base(quotation).grand_total, quotation.currency
+        )
+        default_expiry_date = (
+            quotation.valid_until
+            or (dt.date.today() + dt.timedelta(days=settings.portal_link_days))
+        )
+        already_invited = bool([
+            r for r in quote_send_service.delivery_history(db, user, quote_id)
+            if r.message_type in {
+                EmailMessageType.QUOTE_INVITATION,
+                EmailMessageType.QUOTE_REVISED_INVITATION,
+            }
+        ]) if user.has(Perm.QUOTE_PORTAL_VIEW_DELIVERY) else False
+
+    # --- who it goes to ---------------------------------------------------- #
+    st.markdown("**1. Recipient**")
+    if not options:
+        st.error(
+            "This quotation has no contact email, and the customer has no "
+            "contacts with an address. Add one before sending."
+        )
+        chosen_option = None
+    else:
+        if must_choose:
+            st.caption(
+                "This customer has more than one contact. Choose deliberately — "
+                "commercial terms sent to the wrong person at the right company "
+                "is still a disclosure."
+            )
+        chosen_option = st.radio(
+            "Send to",
+            options,
+            format_func=lambda o: f"{o.label} — {o.email}",
+            # No default when there is a choice to make: an accepted default is
+            # not a decision.
+            index=None if must_choose else 0,
+            key="send_recipient",
+        )
+
+    override = st.checkbox(
+        "Send this quotation only to a different address",
+        key="send_override_on",
+        help=(
+            "A one-time delivery address for this message. The customer record "
+            "is not changed."
+        ),
+    )
+    override_email = ""
+    override_name = ""
+    if override:
+        col_email, col_name = st.columns([2, 1])
+        with col_email:
+            override_email = st.text_input(
+                "One-time address", key="send_override_email",
+                placeholder="name@customer.example",
+            ).strip()
+        with col_name:
+            override_name = st.text_input("Their name", key="send_override_name").strip()
+        st.caption(
+            "**Send this quotation only.** The customer's saved contact details "
+            "are left exactly as they are."
+        )
+
+    recipient_email = override_email or (chosen_option.email if chosen_option else "")
+    recipient_name = override_name or (chosen_option.name if chosen_option else "")
+
+    recipient_issue = (
+        quote_send_service.recipient_problem(recipient_email)
+        if recipient_email else "No recipient selected."
+    )
+    if recipient_email and recipient_issue:
+        st.error(recipient_issue)
+
+    # --- what kind of message ---------------------------------------------- #
+    st.markdown("**2. Message**")
+    col_kind, col_expiry = st.columns([2, 1])
+    with col_kind:
+        message_type = st.radio(
+            "Email type",
+            [
+                EmailMessageType.QUOTE_INVITATION,
+                EmailMessageType.QUOTE_REVISED_INVITATION,
+            ],
+            format_func=lambda t: EMAIL_MESSAGE_DISPLAY_NAMES[t],
+            index=1 if already_invited else 0,
+            horizontal=True,
+            key="send_message_type",
+        )
+    with col_expiry:
+        link_expiry = st.date_input(
+            "Link expires", value=default_expiry_date,
+            min_value=dt.date.today(), key="send_link_expiry",
+        )
+
+    change_summary = ""
+    previous_label = ""
+    if message_type is EmailMessageType.QUOTE_REVISED_INVITATION:
+        change_summary = st.text_input(
+            "What changed (optional, shown to the customer)",
+            key="send_change_summary", max_chars=400,
+        )
+        previous_label = st.text_input(
+            "Previous revision label", value=current_revision_label,
+            key="send_previous_label",
+        )
+
+    st.caption(
+        escape_markdown(
+            f"Sending **{current_revision_label}** at **{base_total_display}**. "
+            f"The customer's link will expire on {format_date(link_expiry)}."
+        )
+    )
+
+    # --- preview ----------------------------------------------------------- #
+    st.markdown("**3. Preview**")
+    st.caption(
+        "Rendered from the real template and the real figures. No link is "
+        "created and nothing is queued — the address in the preview is a "
+        "placeholder."
+    )
+    if st.button("Preview email", key="send_preview_button"):
+        try:
+            with session_scope() as db:
+                preview = quote_send_service.preview(
+                    db, user, db.get(Quotation, quote_id),
+                    message_type=message_type,
+                    recipient_email=recipient_email or "preview@example.invalid",
+                    recipient_name=recipient_name,
+                    previous_revision_label=previous_label,
+                    change_summary=change_summary,
+                    link_expires_on=link_expiry,
+                )
+            st.session_state["send_preview"] = {
+                "subject": preview.subject,
+                "html": preview.html_body,
+                "text": preview.text_body,
+            }
+        except Exception as exc:  # noqa: BLE001 — shown to the employee
+            st.error(str(exc))
+
+    held = st.session_state.get("send_preview")
+    if held:
+        st.text_input("Subject", value=held["subject"], disabled=True,
+                      key="send_preview_subject")
+        html_tab, text_tab = st.tabs(["HTML", "Plain text"])
+        with html_tab:
+            st.components.v1.html(held["html"], height=620, scrolling=True)
+        with text_tab:
+            st.code(held["text"], language=None)
+
+    # --- eligibility ------------------------------------------------------- #
+    st.markdown("**4. Checks**")
+    with session_scope() as db:
+        eligibility = quote_send_service.check_eligibility(
+            db, user, db.get(Quotation, quote_id),
+            recipient=recipient_email, message_type=message_type,
+        )
+    for blocker in eligibility.blockers:
+        st.error(escape_markdown(f"**{blocker.label}.** {blocker.detail}"))
+    for warning in eligibility.warnings:
+        st.warning(escape_markdown(f"**{warning.label}.** {warning.detail}"))
+    if eligibility.may_send and not eligibility.warnings:
+        st.success("Ready to send.")
+
+    # --- confirm and send --------------------------------------------------- #
+    st.markdown("**5. Send**")
+    # Counted across the revision family, because the link the customer is
+    # holding may have been issued against the previous revision — which is
+    # exactly the one a resend has to invalidate.
+    with session_scope() as db:
+        live_links = quote_send_service.live_link_count(db, db.get(Quotation, quote_id))
+    if live_links:
+        st.warning(
+            f"**This replaces the customer's current link.** "
+            f"{live_links} live link(s) will stop working the moment this is "
+            "sent. Anyone already holding one — including the customer — will "
+            "need the new email."
+        )
+
+    confirmed = st.checkbox(
+        escape_markdown(
+            f"I have checked the recipient and am sending {current_revision_label} "
+            f"to {recipient_email or '—'}"
+        ),
+        key="send_confirm",
+    )
+    can_send = bool(
+        eligibility.may_send and recipient_email and not recipient_issue and confirmed
+    )
+
+    if st.button("Send quotation", type="primary", disabled=not can_send,
+                 key="send_button"):
+        try:
+            with session_scope() as db:
+                result = quote_send_service.send(
+                    db, user, quote_id,
+                    message_type=message_type,
+                    recipient_email=recipient_email,
+                    recipient_name=recipient_name,
+                    previous_revision_label=previous_label,
+                    change_summary=change_summary,
+                    expires_at=dt.datetime.combine(
+                        link_expiry, dt.time.max, tzinfo=dt.UTC
+                    ),
+                    # A resend replaces whatever the customer is holding.
+                    revoke_existing=bool(live_links),
+                    expected_revision_no=current_revision_no,
+                )
+                queued = {
+                    "headline": result.headline,
+                    "recipient": result.recipient_email,
+                    "revision": result.revision_label,
+                    "revoked": len(result.revoked_token_ids),
+                }
+        except (SendError, PermissionDenied) as exc:
+            st.error(str(exc))
+        else:
+            st.session_state.pop("send_confirm", None)
+            st.session_state.pop("send_preview", None)
+            # Stashed rather than drawn here: the rerun below refreshes the
+            # delivery history, and anything written before it is discarded
+            # before the employee can read it. It is rendered at the top of
+            # this section on the next pass.
+            st.session_state["send_result"] = queued
+            st.rerun()
+
+    # Worker health, next to the button that depends on it.
+    st.caption(
+        f"{_HEALTH_ICON.get(health.label, '⚪')} Delivery worker: "
+        f"**{health.label}** — {health.detail}"
+    )
+elif user.has(Perm.QUOTE_PORTAL_VIEW_DELIVERY):
+    st.caption(
+        "You can see delivery status below. Sending a quotation needs the "
+        "send permission."
+    )
+else:
+    st.caption("You do not have permission to send quotations.")
+
+
+# --------------------------------------------------------------------------- #
+# What was sent, and what happened to it
+# --------------------------------------------------------------------------- #
+
+st.divider()
+st.markdown("##### Delivery history")
+
+if not user.has(Perm.QUOTE_PORTAL_VIEW_DELIVERY):
+    st.caption("You do not have permission to view delivery history.")
+else:
+    with session_scope() as db:
+        deliveries = quote_send_service.delivery_history(db, user, quote_id)
+
+    if not deliveries:
+        st.caption("Nothing has been queued for this quotation yet.")
+    else:
+        st.dataframe(
+            pd.DataFrame([
+                {
+                    "Message": d.message_label,
+                    "To": d.recipient_email,
+                    "Rev": d.revision_no,
+                    "Status": d.status_label,
+                    "Attempts": d.attempts,
+                    "Queued": format_datetime(d.queued_at),
+                    "Last try": format_datetime(d.last_attempt_at),
+                    "Sent": format_datetime(d.sent_at),
+                    "Next try": format_datetime(d.next_attempt_at),
+                    "Detail": d.failure_summary or "-",
+                    "Queued by": d.queued_by or "system",
+                }
+                for d in deliveries
+            ]),
+            width="stretch", hide_index=True,
+        )
+
+        # Retry is offered only where it would work, and is never confused with
+        # a resend: it sends the same message to the same person with the same
+        # link, and cannot change any of them.
+        retryable = [d for d in deliveries if d.is_failed and not d.payload_expired]
+        expired = [d for d in deliveries if d.payload_expired]
+
+        if retryable and user.has(Perm.QUOTE_PORTAL_RETRY):
+            target = st.selectbox(
+                "Retry a failed delivery", retryable,
+                format_func=lambda d: (
+                    f"{d.message_label} to {d.recipient_email} "
+                    f"(Rev {d.revision_no}, {d.attempts} attempt(s))"
+                ),
+                key="retry_pick",
+            )
+            st.caption(
+                "**Retry delivery** sends the same message to the same address "
+                "with the same link. It cannot change any of them."
+            )
+            if st.button("Retry delivery", key="retry_button"):
+                try:
+                    with session_scope() as db:
+                        quote_send_service.retry(db, user, target.outbox_id)
+                except (SendError, PermissionDenied) as exc:
+                    st.error(str(exc))
+                else:
+                    st.toast("Queued for another attempt", icon="↻")
+                    st.rerun()
+        elif retryable:
+            st.caption("You do not have permission to retry deliveries.")
+
+        if expired:
+            st.warning(
+                "**Some messages can no longer be retried.** Their secure link "
+                "has expired or been replaced. Use **Send to customer** above "
+                "to issue a new link and send a fresh message."
+            )
+
+    st.caption(
+        f"{_HEALTH_ICON.get(health.label, '⚪')} Delivery worker: "
+        f"**{health.label}**"
+    )
 
 
 # --------------------------------------------------------------------------- #

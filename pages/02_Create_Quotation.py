@@ -25,6 +25,7 @@ from modules import (
     pricing_service,
     pricing_snapshot,
     quotation_service,
+    quote_send_service,
     revision_service,
     settings_service,
     shipping_service,
@@ -1656,6 +1657,15 @@ with review_tab:
                 }
                 for row in pricing_snapshot.totals_summary(quote, accepted_response)
             ]
+            summary = quote_send_service.delivery_summary(db, user, quotation_id)
+            delivery = {
+                "has_activity": summary.has_activity,
+                "status_label": summary.status_label,
+                "recipient": summary.recipient_email or "-",
+                "at": format_datetime(summary.at),
+                "is_sent": summary.is_sent,
+                "is_failed": summary.is_failed,
+            }
             portal_summary = {
                 "status": STATUS_DISPLAY_NAMES.get(quote.status, str(quote.status)),
                 "deposit_pct": quote.deposit_pct,
@@ -1716,11 +1726,28 @@ with review_tab:
         else:
             st.success("Company details are complete.")
 
+        # Compact on purpose. Quotation history answers "did this reach the
+        # customer"; the queue console, the retry controls and the message
+        # bodies live on the Customer Portal page, where somebody has gone
+        # looking for them.
+        if delivery["has_activity"]:
+            mark = "✅" if delivery["is_sent"] else ("⚠️" if delivery["is_failed"] else "🕓")
+            st.caption("Latest email")
+            st.markdown(
+                escape_markdown(
+                    f"{mark} **{delivery['status_label']}** — {delivery['recipient']}"
+                    f" · {delivery['at']}"
+                )
+            )
+        elif user.has(Perm.QUOTE_PORTAL_VIEW_DELIVERY):
+            st.caption("Latest email")
+            st.markdown("**Not sent**")
+
         # No plaintext token is shown: only its hash is stored, so a link issued
         # earlier cannot be redisplayed by this page or any other.
         st.caption(
-            "Issuing, revoking and editing which items are optional live on the "
-            "Customer Portal page. A link is shown once, when it is created."
+            "Issuing, revoking, sending and retrying live on the Customer "
+            "Portal page. A link is shown once, when it is created."
         )
         if st.button("Manage Customer Portal", key="goto_portal"):
             st.session_state["portal_quote"] = {"id": quotation_id}
