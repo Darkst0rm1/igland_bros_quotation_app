@@ -249,13 +249,21 @@ python -m modules.worker --loop --interval 60 --batch 50
 idle, which is exactly what a timer cannot tolerate — the same reason quotation
 expiry is a manual sweep. The worker belongs on whatever host runs the customer
 portal, on a small always-on machine, or on any scheduler that can invoke
-`--once` every few minutes.
+`--once` every few minutes. Service and cron definitions are in
+[`GO_LIVE.md`](GO_LIVE.md) §5.
 
 | Signal | Meaning |
 |---|---|
 | Exit code 0 from `--once` | Every subsystem swept cleanly |
 | Exit code 1 from `--once` | At least one subsystem failed; the others still ran |
+| Exit code 2 | The encryption key does not match the rest of the deployment; it refused to start |
 | `WORKER_HEALTH_FILE` | Written after every sweep — check its mtime for liveness |
+
+**Every host must hold the same `EMAIL_PAYLOAD_KEYS`.** The app seals each
+invitation's link and the worker opens it; different key material means nothing
+is ever delivered, and the only symptom is customers not receiving quotations.
+Both processes compare a fingerprint of their key at startup and refuse rather
+than fail quietly, message by message. See [`GO_LIVE.md`](GO_LIVE.md) §3.
 
 `SIGINT` and `SIGTERM` ask for a graceful stop: the worker finishes the sweep it
 is in rather than abandoning leased rows mid-send.

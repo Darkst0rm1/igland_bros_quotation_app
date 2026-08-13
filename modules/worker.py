@@ -121,6 +121,35 @@ def sweep_expired_payloads() -> int:
 # One pass
 # --------------------------------------------------------------------------- #
 
+def check_key_agreement() -> str | None:
+    """Confirm this worker holds the same encryption key as the application.
+
+    Returns a message describing the mismatch, or ``None`` when they agree.
+
+    Worth failing loudly at startup rather than discovering it per message:
+    with different key material the worker cannot open a single sealed
+    invitation, every one fails ``link_unsealable``, and the only visible
+    symptom is customers not receiving quotations. The version *label* being
+    identical is not enough — that is chosen by whoever wrote the configuration,
+    and is exactly what a half-applied rotation leaves matching.
+    """
+    from modules.database import session_scope
+    from modules.secret_box import KeyAgreementError, verify_key_agreement
+
+    try:
+        with session_scope() as session:
+            fingerprint = verify_key_agreement(session)
+    except KeyAgreementError as exc:
+        return str(exc)
+    except Exception:  # noqa: BLE001 — an unreachable database is a separate fault
+        log.warning("Could not verify email key agreement")
+        return None
+
+    if fingerprint:
+        log.info("Email key agreement OK (%s)", fingerprint)
+    return None
+
+
 def run_sweep(*, batch_size: int | None = None, owner: str | None = None) -> SweepResult:
     """One pass over every queue. Never raises.
 
@@ -312,6 +341,14 @@ def main(argv: list[str] | None = None) -> int:
 
     settings = get_settings()
     _configure_logging(args.log_level or settings.log_level)
+
+    # Before any work: a worker with the wrong key cannot deliver a single
+    # invitation, and the only symptom would be customers not receiving
+    # quotations. Refuse to start rather than fail quietly, message by message.
+    mismatch = check_key_agreement()
+    if mismatch:
+        log.error("Refusing to start: %s", mismatch)
+        return 2
 
     if not args.loop:
         result = run_sweep(batch_size=args.batch)

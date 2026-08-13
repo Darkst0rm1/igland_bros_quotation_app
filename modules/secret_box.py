@@ -287,3 +287,137 @@ def open_sealed(payload: str, *, aad: bytes, keyring: Keyring | None = None) -> 
 def is_sealed(value: str | None) -> bool:
     """Whether a stored value looks like one of ours. Cheap, and does not decrypt."""
     return bool(value) and value.startswith(f"{FORMAT_PREFIX}.")
+
+
+# --------------------------------------------------------------------------- #
+# Do two processes hold the same key?
+# --------------------------------------------------------------------------- #
+
+#: Fixed input for the fingerprint. Constant so the same key always produces
+#: the same identifier, and unrelated to any real payload.
+_FINGERPRINT_LABEL = b"soneet:email-payload-key:v1"
+
+
+def key_fingerprint(version: str | None = None, keyring: Keyring | None = None) -> str:
+    """A short, non-reversible identifier for the key behind a version label.
+
+    Exists because the version label is chosen by whoever writes the
+    configuration, and two processes can easily hold *different key material
+    under the same label* — a copy-paste that drops a character, a rotation
+    applied to one host and not the other, a worker deployed from an older
+    secrets file.
+
+    That failure is silent and late: the app seals an invitation with its key,
+    the worker cannot open it, and the message fails as ``link_unsealable``
+    minutes later on a machine nobody is watching. The customer simply never
+    receives their quotation.
+
+    HMAC of a fixed label under the key, truncated. It identifies the key
+    without revealing anything about it, so it is safe to store, log and print
+    on a diagnostics screen.
+    """
+    import hashlib
+    import hmac
+
+    ring = keyring or get_keyring()
+    label = version or ring.active
+    digest = hmac.new(ring.key_for(label), _FINGERPRINT_LABEL, hashlib.sha256)
+    return f"{label}:{digest.hexdigest()[:16]}"
+
+
+class KeyAgreementError(SecretBoxError):
+    """This process holds different key material from the rest of the deployment."""
+
+
+#: Where the agreed fingerprint is recorded. A plain app setting rather than a
+#: new column: it is one string, and adding a migration for it would be more
+#: machinery than the fact deserves.
+AGREEMENT_SETTING = "email_payload_key_fingerprint"
+
+
+def verify_key_agreement(session, *, record: bool = True) -> str:  # noqa: ANN001
+    """Check this process's key against the one the deployment already uses.
+
+    First process to run records its fingerprint; every process afterwards
+    compares. A mismatch raises here — at startup, on the machine that is wrong,
+    naming what to fix — instead of surfacing as undelivered mail hours later.
+
+    Returns the fingerprint. Never raises for a *missing* key in development,
+    where an ephemeral per-process key is normal and comparing it would fail
+    every restart.
+    """
+    from modules.config import get_settings
+    from modules.models import AppSetting
+
+    settings = get_settings()
+    try:
+        current = key_fingerprint()
+    except KeyringError:
+        if settings.is_production:
+            raise
+        return ""
+
+    if not settings.email_payload_keys.strip():
+        # A development key that dies with the process. Recording it would make
+        # every restart look like a mismatch.
+        return current
+
+    row = session.query(AppSetting).filter_by(key=AGREEMENT_SETTING).one_or_none()
+
+    if row is None:
+        if record:
+            session.add(AppSetting(
+                key=AGREEMENT_SETTING,
+                value_json=current,
+                value_type="string",
+                category="email",
+                description=(
+                    "Fingerprint of the encryption key this deployment seals "
+                    "invitation links with. Not the key itself. Every process "
+                    "must agree, or queued invitations cannot be opened and sent."
+                ),
+            ))
+            session.flush()
+        return current
+
+    recorded = str(row.value_json or "")
+    if recorded == current:
+        return current
+
+    recorded_version = recorded.split(":", 1)[0] if ":" in recorded else "?"
+    current_version = current.split(":", 1)[0]
+
+    if recorded_version == current_version:
+        detail = (
+            f"Both are labelled {current_version!r} but the key material differs. "
+            "One of them is out of date — check that EMAIL_PAYLOAD_KEYS is "
+            "identical on every host."
+        )
+    else:
+        detail = (
+            f"This process seals with {current_version!r}; the deployment "
+            f"recorded {recorded_version!r}. If this is a deliberate rotation, "
+            "keep both keys in EMAIL_PAYLOAD_KEYS everywhere and clear the "
+            f"recorded fingerprint ({AGREEMENT_SETTING}) once every host is "
+            "updated."
+        )
+
+    raise KeyAgreementError(
+        "This process holds different email encryption keys from the rest of "
+        f"the deployment. {detail} Queued invitations sealed elsewhere cannot "
+        "be opened, so they would fail to send."
+    )
+
+
+def clear_key_agreement(session) -> None:  # noqa: ANN001
+    """Forget the recorded fingerprint, so the next process records a new one.
+
+    The deliberate step in a rotation: once every host carries the new key,
+    clearing this lets the deployment settle on it.
+    """
+    from modules.models import AppSetting
+
+    row = session.query(AppSetting).filter_by(key=AGREEMENT_SETTING).one_or_none()
+    if row is not None:
+        session.delete(row)
+        session.flush()

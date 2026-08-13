@@ -102,6 +102,33 @@ def _sync_permissions() -> None:
         st.session_state["_permissions_synced"] = True
 
 
+def _check_key_agreement() -> str | None:
+    """Confirm this process seals invitation links with the deployment's key.
+
+    The failure this catches is silent and remote: the app seals an invitation
+    with its key, the worker holds different material under the same version
+    label, and the message fails to send minutes later on a machine nobody is
+    watching. The customer never receives their quotation and nothing on screen
+    says so. Checking at startup puts the error on the host that is wrong.
+    """
+    from modules.secret_box import KeyAgreementError, verify_key_agreement
+
+    try:
+        with session_scope() as session:
+            verify_key_agreement(session)
+    except KeyAgreementError as exc:
+        paragraphs = [
+            "**Email encryption keys do not match.**",
+            str(exc),
+            "Until this is corrected, quotation emails will be queued but "
+            "cannot be delivered.",
+        ]
+        return "\n\n".join(paragraphs)
+    except Exception as exc:  # noqa: BLE001 - never block startup on this check
+        log.warning("Could not verify email key agreement: %s", type(exc).__name__)
+    return None
+
+
 def _startup_check() -> tuple[bool, str | None]:
     """Verify the database schema matches this code.
 
@@ -138,6 +165,9 @@ def _startup_check() -> tuple[bool, str | None]:
             f"`{expected}`.\n\n**Connected to:** `{where}`\n\n"
             "Apply the outstanding migrations:\n\n```\nalembic upgrade head\n```"
         )
+
+    if problem is None:
+        problem = _check_key_agreement()
 
     if problem is None:
         _sync_permissions()

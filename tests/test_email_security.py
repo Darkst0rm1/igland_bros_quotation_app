@@ -762,3 +762,148 @@ class TestNoRemoteResources:
         )
         assert "Northwind" in message.html_body
         assert "<img" not in message.html_body
+
+
+# --------------------------------------------------------------------------- #
+# Do two processes hold the same key?
+# --------------------------------------------------------------------------- #
+
+class TestKeyAgreement:
+    """The failure this guards against is silent, remote and total.
+
+    The app seals an invitation with its key; the worker holds different
+    material under the same version label; every message fails
+    ``link_unsealable`` minutes later on a machine nobody is watching. Nothing
+    on screen says so — customers simply never receive their quotations.
+    """
+
+    def test_a_fingerprint_identifies_a_key_without_revealing_it(self):
+        ring = _keyring()
+        fingerprint = secret_box.key_fingerprint(keyring=ring)
+
+        assert fingerprint.startswith("k1:")
+        for key in ring.keys.values():
+            assert base64.urlsafe_b64encode(key).decode().rstrip("=") not in fingerprint
+            assert key.hex() not in fingerprint
+
+    def test_the_same_key_always_fingerprints_the_same(self):
+        ring = _keyring()
+        assert secret_box.key_fingerprint(keyring=ring) == secret_box.key_fingerprint(
+            keyring=ring
+        )
+
+    def test_different_material_under_the_same_label_differs(self):
+        """The whole point: the label matching proves nothing."""
+        first = secret_box.parse_keyring(f"v1:{secret_box.generate_key()}", "v1")
+        second = secret_box.parse_keyring(f"v1:{secret_box.generate_key()}", "v1")
+
+        assert secret_box.key_fingerprint(keyring=first).startswith("v1:")
+        assert secret_box.key_fingerprint(keyring=second).startswith("v1:")
+        assert secret_box.key_fingerprint(keyring=first) != secret_box.key_fingerprint(
+            keyring=second
+        )
+
+    def test_the_first_process_records_the_deployment_fingerprint(self, session):
+        from modules.models import AppSetting
+
+        recorded = secret_box.verify_key_agreement(session)
+        session.flush()
+
+        row = session.query(AppSetting).filter_by(
+            key=secret_box.AGREEMENT_SETTING
+        ).one()
+        assert row.value_json == recorded
+        # The stored value is the fingerprint, never the key.
+        assert "AAAA" not in str(row.value_json)
+
+    def test_a_matching_process_agrees(self, session):
+        first = secret_box.verify_key_agreement(session)
+        session.flush()
+        assert secret_box.verify_key_agreement(session) == first
+
+    def test_a_mismatched_process_is_refused(self, session, monkeypatch):
+        secret_box.verify_key_agreement(session)
+        session.flush()
+
+        # A second host whose key material differs under the same label.
+        monkeypatch.setattr(
+            secret_box, "key_fingerprint", lambda *a, **k: "t1:ffffffffffffffff"
+        )
+        with pytest.raises(secret_box.KeyAgreementError) as caught:
+            secret_box.verify_key_agreement(session)
+
+        message = str(caught.value)
+        assert "same label" in message or "key material differs" in message
+        assert "EMAIL_PAYLOAD_KEYS" in message
+
+    def test_a_rotation_mismatch_explains_the_rotation(self, session, monkeypatch):
+        secret_box.verify_key_agreement(session)
+        session.flush()
+
+        monkeypatch.setattr(
+            secret_box, "key_fingerprint", lambda *a, **k: "t2:ffffffffffffffff"
+        )
+        with pytest.raises(secret_box.KeyAgreementError) as caught:
+            secret_box.verify_key_agreement(session)
+        assert "rotation" in str(caught.value)
+
+    def test_clearing_lets_a_rotation_settle(self, session, monkeypatch):
+        secret_box.verify_key_agreement(session)
+        session.flush()
+        secret_box.clear_key_agreement(session)
+
+        monkeypatch.setattr(
+            secret_box, "key_fingerprint", lambda *a, **k: "t2:ffffffffffffffff"
+        )
+        assert secret_box.verify_key_agreement(session) == "t2:ffffffffffffffff"
+
+    def test_no_message_ever_quotes_key_material(self, session, monkeypatch):
+        secret_box.verify_key_agreement(session)
+        session.flush()
+        monkeypatch.setattr(
+            secret_box, "key_fingerprint", lambda *a, **k: "t1:0000000000000000"
+        )
+        with pytest.raises(secret_box.KeyAgreementError) as caught:
+            secret_box.verify_key_agreement(session)
+
+        message = str(caught.value)
+        assert "AAAA" not in message
+        assert "BBBB" not in message
+
+    def test_the_worker_refuses_to_start_on_a_mismatch(self, session, monkeypatch):
+        from modules import worker
+
+        secret_box.verify_key_agreement(session)
+        session.commit()
+
+        monkeypatch.setattr(
+            secret_box, "key_fingerprint", lambda *a, **k: "t1:ffffffffffffffff"
+        )
+        assert worker.check_key_agreement() is not None
+        # Non-zero, so a supervisor or scheduler notices.
+        assert worker.main(["--once"]) == 2
+
+    def test_the_worker_starts_when_keys_agree(self, session, monkeypatch):
+        from modules import worker
+
+        secret_box.verify_key_agreement(session)
+        session.commit()
+
+        assert worker.check_key_agreement() is None
+        assert worker.main(["--once"]) == 0
+
+    def test_a_development_key_is_not_recorded(self, session, monkeypatch):
+        """An ephemeral per-process key would make every restart a mismatch."""
+        from modules.config import get_settings
+        from modules.models import AppSetting
+
+        monkeypatch.setattr(get_settings(), "email_payload_keys", "")
+        monkeypatch.setattr(
+            secret_box, "key_fingerprint", lambda *a, **k: "dev:1234567890abcdef"
+        )
+        secret_box.verify_key_agreement(session)
+        session.flush()
+
+        assert session.query(AppSetting).filter_by(
+            key=secret_box.AGREEMENT_SETTING
+        ).one_or_none() is None
