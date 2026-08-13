@@ -52,9 +52,18 @@ pytest==9.1.1
 # — that the totals appear, that the DRAFT mark is present or absent, and that
 # no cost or margin figure leaked into a customer document.
 pypdf==6.14.2
+# Also test-only: parses render.yaml so the deployment Blueprint is checked by
+# the suite rather than by a failed deploy — start commands, health path, and
+# the assertion that no credential was ever written into it.
+PyYAML==6.0.3
 
 # --- Customer portal (separate public service) ----------------------------
-# starlette, jinja2, uvicorn and pydantic already arrive with Streamlit; only
-# FastAPI is additional. httpx is needed by Starlette's TestClient.
+# starlette, jinja2 and pydantic already arrive with Streamlit; only FastAPI is
+# additional. httpx is needed by Starlette's TestClient.
 fastapi==0.141.1
 httpx==0.28.1
+# Pinned explicitly rather than relied on transitively via Streamlit. The portal
+# is deployed as its own service and its start command *is* the uvicorn CLI —
+# an undeclared dependency there is a start-up failure, not a missing feature.
+# It also means the portal host never needs Streamlit installed to serve.
+uvicorn[standard]==0.52.1
