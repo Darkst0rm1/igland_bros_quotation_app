@@ -86,7 +86,8 @@ def upgrade() -> None:
                     created_at, updated_at
                 ) VALUES (
                     :username, :email, :name, :title, :pw,
-                    0, 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    :must_change, :is_active, 0,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                 )
                 """
             ),
@@ -96,6 +97,14 @@ def upgrade() -> None:
                 "name": PORTAL_DISPLAY_NAME,
                 "title": "System account",
                 "pw": _unusable_password_hash(),
+                # Bound as Python booleans rather than written as 0 in the SQL.
+                # SQLite treats 0 as false; PostgreSQL refuses it outright —
+                # "column is of type boolean but expression is of type integer"
+                # — and this migration only ever ran against SQLite until it
+                # reached production. failed_login_count stays a literal because
+                # it genuinely is an integer.
+                "must_change": False,
+                "is_active": False,
             },
         )
     elif existing["is_active"]:

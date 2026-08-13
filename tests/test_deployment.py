@@ -852,3 +852,97 @@ class TestDatabaseUrlDriver:
         requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
         assert "psycopg2" not in requirements
         assert "psycopg[binary]" in requirements
+
+
+class TestMigrationsArePortable:
+    """SQLite accepts things PostgreSQL refuses, and every test runs on SQLite.
+
+    The suite builds its schema with ``create_all`` and only *stamps* the
+    Alembic revision, so raw SQL inside a migration is never executed by any
+    test. It first runs for real against PostgreSQL during a production deploy —
+    which is where `must_change_password` being given `0` instead of `false`
+    finally surfaced, as a failed pre-deploy.
+    """
+
+    def _migration_sources(self) -> dict[str, str]:
+        folder = ROOT / "migrations" / "versions"
+        return {
+            path.name: path.read_text(encoding="utf-8")
+            for path in folder.glob("*.py")
+        }
+
+    def _boolean_columns(self) -> dict[str, set[str]]:
+        """Every boolean column, by table, from the models."""
+        from modules import models  # noqa: F401
+        from modules.database import Base
+        from sqlalchemy import Boolean
+
+        found: dict[str, set[str]] = {}
+        for table in Base.metadata.tables.values():
+            names = {
+                column.name for column in table.columns
+                if isinstance(column.type, Boolean)
+            }
+            if names:
+                found[table.name] = names
+        return found
+
+    def test_no_raw_insert_puts_an_integer_in_a_boolean_column(self):
+        """The exact mistake, generalised across every migration."""
+        booleans = self._boolean_columns()
+        assert booleans, "no boolean columns found — the check would pass vacuously"
+
+        pattern = re.compile(
+            r"INSERT\s+INTO\s+(\w+)\s*\(([^)]*)\)\s*VALUES\s*\(([^)]*)\)",
+            re.IGNORECASE | re.DOTALL,
+        )
+
+        problems = []
+        for filename, source in self._migration_sources().items():
+            for match in pattern.finditer(source):
+                table = match.group(1).lower()
+                if table not in booleans:
+                    continue
+                columns = [c.strip() for c in match.group(2).split(",") if c.strip()]
+                values = [v.strip() for v in match.group(3).split(",") if v.strip()]
+                if len(columns) != len(values):
+                    continue        # SELECT-based insert, or a shape we cannot map
+                for column, value in zip(columns, values):
+                    if column.lower() not in booleans[table]:
+                        continue
+                    if re.fullmatch(r"[01]", value):
+                        problems.append(
+                            f"{filename}: {table}.{column} is given the integer "
+                            f"{value}; PostgreSQL requires a boolean"
+                        )
+        assert not problems, "\n".join(problems)
+
+    def test_the_portal_system_user_is_inserted_with_real_booleans(self):
+        """The specific regression, pinned."""
+        source = (
+            ROOT / "migrations" / "versions"
+            / "d4b8e6c1a072_portal_system_user_and_guards.py"
+        ).read_text(encoding="utf-8")
+
+        assert '"must_change": False' in source
+        assert '"is_active": False' in source
+        assert ":must_change, :is_active, 0" in source
+
+    def test_boolean_server_defaults_use_a_form_postgres_accepts(self):
+        """`server_default="0"` is fine — Postgres reads '0' as false in DDL.
+
+        Recorded because it looks like the same bug and is not: the failure was
+        a *value* in an INSERT, not a DDL default. Removing these would be a
+        pointless migration.
+        """
+        booleans = self._boolean_columns()
+        for source in self._migration_sources().values():
+            for match in re.finditer(
+                r'sa\.Column\(\s*"(\w+)"\s*,\s*sa\.Boolean\(\)[^)]*'
+                r'server_default="([^"]*)"',
+                source,
+            ):
+                assert match.group(2) in {"0", "1", "false", "true"}, (
+                    f"{match.group(1)} has an unusual boolean default"
+                )
+        assert booleans
