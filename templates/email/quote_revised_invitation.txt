@@ -1,0 +1,31 @@
+{{ brand.name }}
+{{ "=" * brand.name|length }}
+
+Dear {{ data.customer_name }},
+
+Thank you for your feedback. We have revised your quotation and
+{{ data.revision_label }} is ready for you to review.
+{% if data.previous_revision_label %}This replaces {{ data.previous_revision_label }}, whose link no longer works.
+{% endif %}
+  Quotation:   {{ data.quote_number }} - {{ data.revision_label }}
+{% if data.project_name %}  Project:     {{ data.project_name }}
+{% endif %}  {{ data.total_label }}: {{ data.total_display }}
+{% if data.valid_until_display %}  Valid until: {{ data.valid_until_display }}
+{% endif %}
+{% if data.change_summary %}What changed: {{ data.change_summary }}
+
+{% endif %}View revised quotation:
+
+{{ secure_url }}
+
+If anything still needs adjusting, reply to this message and we will take
+another look.
+
+--
+{{ brand.name }}
+{% for line in brand.address_lines %}{{ line }}
+{% endfor %}{% if brand.phone %}{{ brand.phone }}
+{% endif %}{% if brand.email %}{{ brand.email }}
+{% endif %}{% if brand.legal_footer %}
+{{ brand.legal_footer }}
+{% endif %}

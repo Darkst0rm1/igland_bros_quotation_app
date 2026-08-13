@@ -1,0 +1,101 @@
+{#
+  Blocks shared by more than one message. Macros rather than includes so each
+  takes explicit arguments — an include that reads whatever happens to be in
+  scope is how a customer template ends up rendering an internal value.
+#}
+
+{#
+  show_validity is off for confirmations: once a quotation has been accepted
+  or superseded by a change request, a validity date is at best noise and at
+  worst reads as though the agreement itself expires.
+#}
+{% macro summary_table(data, show_validity=True) %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+       style="background:#f7f9fb; border:1px solid #e2e7ee; border-radius:8px;
+              margin:18px 0;">
+  <tr>
+    <td style="padding:16px 18px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+             style="font-size:14px; line-height:1.7;">
+        <tr>
+          <td style="color:#5f6b7a; padding-right:12px;">Quotation</td>
+          <td align="right" style="font-weight:600;">
+            {{ data.quote_number }} &middot; {{ data.revision_label }}
+          </td>
+        </tr>
+        {% if data.project_name %}
+        <tr>
+          <td style="color:#5f6b7a;">Project</td>
+          <td align="right">{{ data.project_name }}</td>
+        </tr>
+        {% endif %}
+        <tr>
+          <td style="color:#5f6b7a;">{{ data.total_label }}</td>
+          <td align="right" style="font-weight:700; font-size:17px;">
+            {{ data.total_display }}
+          </td>
+        </tr>
+        {% if show_validity and data.valid_until_display %}
+        <tr>
+          <td style="color:#5f6b7a;">Valid until</td>
+          <td align="right">{{ data.valid_until_display }}</td>
+        </tr>
+        {% endif %}
+      </table>
+    </td>
+  </tr>
+</table>
+{% endmacro %}
+
+
+{#
+  A bulletproof button: a table cell with a background, not a styled <a>.
+  Outlook ignores padding on an anchor, which collapses the button to bare
+  underlined text — the one element in the message the customer is meant to
+  press.
+#}
+{% macro view_button(url, label, brand) %}
+<table role="presentation" cellpadding="0" cellspacing="0" border="0"
+       style="margin:22px 0;">
+  <tr>
+    <td align="center" bgcolor="{{ brand.primary }}"
+        style="border-radius:8px; background:{{ brand.primary }};">
+      <a href="{{ url }}"
+         style="display:inline-block; padding:15px 34px; font-size:16px;
+                font-weight:700; color:#ffffff; text-decoration:none;
+                border-radius:8px; min-width:180px; text-align:center;">
+        {{ label }}
+      </a>
+    </td>
+  </tr>
+</table>
+{% endmacro %}
+
+
+{#
+  The same link as plain text underneath. Some clients strip anchors, some
+  people forward as text, and a customer who cannot press the button must still
+  be able to reach their quotation. The URL is not shortened or redirected:
+  a customer should be able to see the host they are being sent to.
+#}
+{% macro link_fallback(url) %}
+<p style="font-size:12px; line-height:1.6; color:#5f6b7a; margin:0 0 6px;">
+  If the button does not work, copy this address into your browser:
+</p>
+<p style="font-size:12px; line-height:1.6; margin:0 0 18px; word-break:break-all;">
+  <a href="{{ url }}" style="color:#5f6b7a;">{{ url }}</a>
+</p>
+{% endmacro %}
+
+
+{% macro internal_table(rows) %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+       style="font-size:14px; line-height:1.8; margin:16px 0;">
+  {% for label, value in rows %}
+  <tr>
+    <td style="color:#5f6b7a; padding-right:16px; white-space:nowrap;">{{ label }}</td>
+    <td style="font-weight:600;">{{ value }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endmacro %}

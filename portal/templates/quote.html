@@ -1,0 +1,337 @@
+{% extends "base.html" %}
+{% block title %}Quotation {{ quote.quote_number }}{% endblock %}
+
+{#
+  Autoescaping is on (Jinja2Templates default), so every value below —
+  customer-entered names and comments, employee-entered descriptions, terms and
+  notes — is escaped. Nothing here uses |safe.
+
+  Money is formatted only here, at the presentation boundary. The projection
+  carries Decimal.
+#}
+
+{% block body %}
+<div class="layout">
+
+  <header class="brand" role="banner">
+    {% if brand.has_logo %}
+      <img class="brand-logo" src="/quote/public/{{ token }}/assets/logo"
+           alt="{{ brand.name }}">
+    {% endif %}
+    <div class="brand-mark">{{ brand.name or quote.company.name or "Quotation" }}</div>
+    {% if brand.slogan %}<p class="brand-slogan">{{ brand.slogan }}</p>{% endif %}
+    {% if quote.company.address_lines %}
+      <address class="brand-detail">
+        {% for line in quote.company.address_lines %}{{ line }}<br>{% endfor %}
+        {% if quote.company.phone %}{{ quote.company.phone }}<br>{% endif %}
+        {% if quote.company.email %}<a href="mailto:{{ quote.company.email }}">{{ quote.company.email }}</a>{% endif %}
+      </address>
+    {% endif %}
+  </header>
+
+  <main id="main" class="document">
+
+    {% if error %}
+      <p class="alert" role="alert">{{ error }}</p>
+    {% endif %}
+
+    {% if quote.accepted %}
+      <div class="banner accepted" role="status">
+        <strong>Accepted</strong>
+        <span>
+          {{ quote.accepted.revision_label }} was accepted by
+          {{ quote.accepted.customer_name }} on
+          {{ quote.accepted.accepted_at.strftime("%d %b %Y") }} at
+          {{ quote.accepted.grand_total | money(quote.accepted.currency) }}.
+        </span>
+        {#
+          The signature is confirmed, never shown. Anyone holding the link can
+          read this page; the signature itself belongs only in the PDF, which
+          is served over the validated download route.
+        #}
+        {% if quote.accepted.signature_name %}
+          <span class="signature-recorded">&#10003; Signature recorded</span>
+        {% endif %}
+        <span class="muted">This quotation is now read-only. Any change
+          requires a new quotation.</span>
+      </div>
+    {% elif quote.is_expired %}
+      <div class="banner expired" role="status">
+        <strong>Expired</strong>
+        <span>This quotation lapsed on {{ quote.valid_until.strftime("%d %b %Y") }}.
+          Please contact us for current pricing.</span>
+      </div>
+    {% endif %}
+
+    <section class="head">
+      <div class="head-block">
+        <p class="label">Quotation</p>
+        <p class="value strong">{{ quote.quote_number }} &middot; {{ quote.revision_label }}</p>
+        <p class="value">{{ quote.customer.company }}</p>
+        {% if quote.customer.contact_name %}<p class="muted">{{ quote.customer.contact_name }}</p>{% endif %}
+        {% if quote.customer.billing_address %}<p class="muted pre">{{ quote.customer.billing_address }}</p>{% endif %}
+      </div>
+      <div class="head-block">
+        <p class="label">Issued</p>
+        <p class="value">{{ quote.quote_date.strftime("%d %b %Y") }}</p>
+        {% if quote.valid_until %}
+          <p class="label">Valid until</p>
+          <p class="value">{{ quote.valid_until.strftime("%d %b %Y") }}</p>
+        {% endif %}
+        {% if quote.sales_representative %}
+          <p class="label">Your representative</p>
+          <p class="value">{{ quote.sales_representative }}</p>
+        {% endif %}
+      </div>
+    </section>
+
+    <form id="quote-form" method="post"
+          action="/quote/public/{{ token }}/preview" class="lines-form">
+      <input type="hidden" name="nonce" value="{{ nonce }}">
+      <input type="hidden" name="signature" value="{{ signature }}">
+
+      <table class="lines">
+        <caption class="sr-only">Products and services quoted</caption>
+        <thead>
+          <tr>
+            {% if quote.has_selectable_lines %}<th scope="col"><span class="sr-only">Include</span></th>{% endif %}
+            <th scope="col">Product / Service</th>
+            <th scope="col" class="num">Qty</th>
+            <th scope="col" class="num">Unit price</th>
+            <th scope="col" class="num">Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for line in quote.lines %}
+          <tr class="{% if line.is_selectable and line.ref not in quote.selected_refs %}not-included{% endif %}">
+            {% if quote.has_selectable_lines %}
+            <td class="pick">
+              {% if line.is_selectable and not quote.is_read_only %}
+                <input type="checkbox" name="selected" value="{{ line.ref }}"
+                       id="pick-{{ line.ref }}"
+                       {% if line.ref in quote.selected_refs %}checked{% endif %}>
+                <label class="sr-only" for="pick-{{ line.ref }}">
+                  Include {{ line.description }}</label>
+              {% elif line.is_selectable and line.ref in quote.selected_refs %}
+                <span class="tick" aria-label="Included">&#10003;</span>
+              {% endif %}
+            </td>
+            {% endif %}
+            <td data-label="Product / Service">
+              <div class="line-body">
+                {% if line.has_image %}
+                  <img class="line-thumb" loading="lazy" alt=""
+                       src="/quote/public/{{ token }}/assets/product/{{ line.ref }}">
+                {% endif %}
+                <div class="line-text">
+              <span class="line-name">{{ line.description }}</span>
+              {% if line.specification %}<span class="line-spec">{{ line.specification }}</span>{% endif %}
+              {% if line.size or line.pack_size %}
+                <span class="line-spec">{{ line.size }}{% if line.size and line.pack_size %} &middot; {% endif %}{{ line.pack_size }}</span>
+              {% endif %}
+              {% if line.remarks %}<span class="line-spec">{{ line.remarks }}</span>{% endif %}
+              {% if line.is_selectable %}
+                <span class="pill {{ line.inclusion | lower }}">{{ line.inclusion_label }}</span>
+              {% endif %}
+                </div>
+              </div>
+            </td>
+            <td class="num" data-label="Qty">{{ line.quantity_packs | qty }}</td>
+            <td class="num" data-label="Unit price">{{ line.unit_price | money(quote.currency) }}</td>
+            <td class="num" data-label="Total">{{ line.line_total | money(quote.currency) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+
+      {% if quote.has_selectable_lines and not quote.is_read_only %}
+        <p class="recalc">
+          <button type="submit" class="btn secondary">Update total</button>
+          <span class="muted">Optional items are not included until you tick
+            them and they are only recorded when you submit a response.</span>
+        </p>
+      {% endif %}
+    </form>
+
+    {% if quote.shipping %}
+    <section class="panel">
+      <h2>Shipping</h2>
+      <dl class="grid-detail">
+        {% if quote.shipping.incoterm %}<dt>Incoterm</dt><dd>{{ quote.shipping.incoterm }} {{ quote.shipping.incoterm_place }}</dd>{% endif %}
+        {% if quote.shipping.container_summary %}<dt>Containers</dt><dd>{{ quote.shipping.container_summary }}</dd>{% endif %}
+        {% if quote.shipping.shipping_line %}<dt>Shipping line</dt><dd>{{ quote.shipping.shipping_line }}</dd>{% endif %}
+        {% if quote.shipping.port_of_loading %}<dt>Port of loading</dt><dd>{{ quote.shipping.port_of_loading }}</dd>{% endif %}
+        {% if quote.shipping.port_of_discharge %}<dt>Port of discharge</dt><dd>{{ quote.shipping.port_of_discharge }}</dd>{% endif %}
+      </dl>
+      {% if quote.shipping.notes %}<p class="muted pre">{{ quote.shipping.notes }}</p>{% endif %}
+    </section>
+    {% endif %}
+
+    {% if quote.customer_notes %}
+    <section class="panel"><h2>Notes</h2><p class="pre">{{ quote.customer_notes }}</p></section>
+    {% endif %}
+
+    {% if quote.terms %}
+    <section class="panel">
+      <h2>Terms and conditions</h2>
+      {% for term in quote.terms %}
+        <h3>{{ term.title }}</h3>
+        <p class="pre muted">{{ term.body }}</p>
+      {% endfor %}
+    </section>
+    {% endif %}
+
+    {% if not quote.is_read_only %}
+    <section class="panel" id="respond">
+      <h2>Your response</h2>
+
+      <details class="respond" open>
+        <summary class="respond-summary">Approve this quotation</summary>
+        <form method="post" action="/quote/public/{{ token }}/approve" class="respond-form">
+          <input type="hidden" name="nonce" value="{{ nonce }}">
+          <input type="hidden" name="signature" value="{{ signature }}">
+          {% for ref in quote.selected_refs %}
+            <input type="hidden" name="selected" value="{{ ref }}">
+          {% endfor %}
+
+          <p class="confirm-total">
+            You are approving a total of
+            <strong>{{ quote.totals.grand_total | money(quote.currency) }}</strong>
+          </p>
+
+          <div class="field">
+            <label for="customer_name">Your name <span aria-hidden="true">*</span></label>
+            <input id="customer_name" name="customer_name" required maxlength="160"
+                   autocomplete="name">
+          </div>
+          <div class="field">
+            <label for="job_title">Job title</label>
+            <input id="job_title" name="job_title" maxlength="120"
+                   autocomplete="organization-title">
+          </div>
+          <div class="field">
+            <label for="customer_email">Email address</label>
+            <input id="customer_email" name="customer_email" type="email"
+                   maxlength="255" autocomplete="email">
+          </div>
+          <div class="field">
+            <label for="signature_name">Signature (type your full name)</label>
+            <input id="signature_name" name="signature_name" maxlength="160"
+                   class="signature">
+          </div>
+          <div class="field">
+            <label for="approve_comment">Comment</label>
+            <textarea id="approve_comment" name="comment" rows="2" maxlength="2000"></textarea>
+          </div>
+          <div class="field check">
+            <input id="accepted_terms" name="accepted_terms" type="checkbox"
+                   value="on" required>
+            <label for="accepted_terms">I accept this quotation and its terms
+              and conditions.</label>
+          </div>
+          <button type="submit" class="btn primary wide">Approve quotation</button>
+        </form>
+      </details>
+
+      <details class="respond">
+        <summary class="respond-summary">Request changes</summary>
+        <form method="post" action="/quote/public/{{ token }}/request-changes"
+              class="respond-form">
+          <input type="hidden" name="nonce" value="{{ nonce }}">
+          <input type="hidden" name="signature" value="{{ signature }}">
+          <div class="field">
+            <label for="rc_name">Your name <span aria-hidden="true">*</span></label>
+            <input id="rc_name" name="customer_name" required maxlength="160">
+          </div>
+          <div class="field">
+            <label for="rc_email">Email address</label>
+            <input id="rc_email" name="customer_email" type="email" maxlength="255">
+          </div>
+          <div class="field">
+            <label for="rc_comment">What would you like changed?
+              <span aria-hidden="true">*</span></label>
+            <textarea id="rc_comment" name="comment" rows="4" required
+                      maxlength="2000"></textarea>
+          </div>
+          <button type="submit" class="btn secondary wide">Send request</button>
+        </form>
+      </details>
+    </section>
+    {% endif %}
+  </main>
+
+  <aside class="summary" aria-label="Quotation summary">
+    <div class="summary-card">
+      <p class="label">Quotation total</p>
+      <p class="total">{{ quote.totals.grand_total | money(quote.currency) }}</p>
+
+      <dl class="breakdown">
+        <dt>Subtotal</dt><dd>{{ quote.totals.subtotal | money(quote.currency) }}</dd>
+        {% if quote.totals.discount %}
+          <dt>Discount</dt><dd>&minus;{{ quote.totals.discount | money(quote.currency) }}</dd>
+        {% endif %}
+        {% for charge in quote.charges %}
+          <dt>{{ charge.label }}</dt><dd>{{ charge.amount | money(quote.currency) }}</dd>
+        {% endfor %}
+        <dt>{{ quote.totals.tax_label }}</dt>
+        <dd>{{ quote.totals.tax_amount | money(quote.currency) }}</dd>
+      </dl>
+
+      {% if quote.totals.deposit_due %}
+        <p class="deposit">Deposit due:
+          <strong>{{ quote.totals.deposit_due | money(quote.currency) }}</strong></p>
+      {% endif %}
+
+      {% if quote.totals.optional_available and not quote.is_read_only %}
+        <p class="muted small">
+          {{ quote.totals.optional_available | money(quote.currency) }} of optional
+          items is available and not yet included.
+        </p>
+      {% endif %}
+
+      {% if not quote.is_read_only %}
+        <a class="btn primary wide" href="#respond">Approve quotation</a>
+        <a class="btn secondary wide" href="#respond">Request changes</a>
+      {% else %}
+        <p class="muted small">This quotation is read-only.</p>
+      {% endif %}
+
+      {#
+        Only rendered when pressing it works. For a live quotation that is
+        always; for an accepted one only once the immutable document exists —
+        a button that returns "not ready" is worse than no button.
+
+        The selection is mirrored as hidden fields, the same way the approval
+        form does it, so the PDF matches the total shown above. The server
+        reprices from these references regardless; they say which lines, never
+        what they cost.
+      #}
+      {% if can_download %}
+        <form method="post" action="/quote/public/{{ token }}/download.pdf"
+              class="download-form">
+          <input type="hidden" name="nonce" value="{{ download_nonce }}">
+          <input type="hidden" name="signature" value="{{ download_signature }}">
+          {% for ref in quote.selected_refs %}
+            <input type="hidden" name="selected" value="{{ ref }}">
+          {% endfor %}
+          <button type="submit" class="btn secondary wide">Download PDF</button>
+        </form>
+      {% elif document_pending %}
+        <p class="muted small">Your signed copy is being prepared. Please check
+          back shortly.</p>
+      {% endif %}
+    </div>
+  </aside>
+
+  {% if brand.legal_footer %}
+  <footer class="legal">{{ brand.legal_footer }}</footer>
+  {% endif %}
+
+  {% if not quote.is_read_only %}
+  <div class="mobile-bar">
+    <span class="mobile-total">{{ quote.totals.grand_total | money(quote.currency) }}</span>
+    <a class="btn primary" href="#respond">Approve</a>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

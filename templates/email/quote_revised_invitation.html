@@ -1,0 +1,33 @@
+{% extends "_base.html" %}
+{% import "_parts.html" as parts %}
+{% block content %}
+
+<p style="font-size:16px; line-height:1.6; margin:0 0 14px;">
+  Dear {{ data.customer_name }},
+</p>
+
+<p style="font-size:15px; line-height:1.7; margin:0 0 4px;">
+  Thank you for your feedback. We have revised your quotation and
+  {{ data.revision_label }} is ready for you to review.
+  {% if data.previous_revision_label %}
+    This replaces {{ data.previous_revision_label }}, whose link no longer works.
+  {% endif %}
+</p>
+
+{{ parts.summary_table(data) }}
+
+{% if data.change_summary %}
+<p style="font-size:14px; line-height:1.7; margin:0 0 4px;">
+  <span style="color:#5f6b7a;">What changed:</span> {{ data.change_summary }}
+</p>
+{% endif %}
+
+{{ parts.view_button(secure_url, "View revised quotation", brand) }}
+{{ parts.link_fallback(secure_url) }}
+
+<p style="font-size:14px; line-height:1.7; margin:0 0 14px;">
+  If anything still needs adjusting, reply to this message and we will take
+  another look.
+</p>
+
+{% endblock %}

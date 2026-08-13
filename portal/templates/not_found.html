@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Quotation unavailable{% endblock %}
+{% block body %}
+<main id="main" class="centred">
+  <div class="card notice">
+    <h1>This quotation is not available</h1>
+    <p>The link may have expired, been replaced by a newer version, or already
+       been actioned.</p>
+    <p class="muted">If you were expecting to see a quotation, please contact
+       your representative{% if support_email %} at
+       <a href="mailto:{{ support_email }}">{{ support_email }}</a>{% endif %}
+       and we will send you a current link.</p>
+  </div>
+</main>
+{% endblock %}

@@ -1,0 +1,14 @@
+{{ brand.name }} - internal notification
+{{ "=" * (brand.name|length + 25) }}
+
+{{ data.customer_company }} ASKED FOR CHANGES to {{ data.quote_number }} {{ data.revision_label }}
+
+{% for label, value in data.rows %}  {{ "%-22s"|format(label ~ ":") }}{{ value }}
+{% endfor %}
+{% if data.comment %}What they asked for:
+
+{{ data.comment }}
+
+{% endif %}The quotation has moved to Revision Required. Create a revision in the quotation
+application to send updated pricing. This message deliberately contains no
+customer access link.

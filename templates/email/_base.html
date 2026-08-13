@@ -1,0 +1,88 @@
+{#
+  The shell every customer email extends.
+
+  Table layout and inline styles on purpose. Email clients are not browsers:
+  Outlook renders through Word, Gmail strips <style> blocks from the head, and
+  flexbox is unreliable across all of them. A layout that looks dated in a
+  browser but survives Outlook is the correct trade for a document a customer
+  has to be able to read and act on.
+
+  Autoescaping is on, and nothing here uses |safe. Every value below was typed
+  by a customer or an employee.
+
+  No remote resources of any kind — no web fonts, no CDN, no tracking pixel, no
+  hosted logo. A customer opening a quotation must not be reporting that fact to
+  a third party, and images that fail to load make a quotation look fake.
+#}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ subject }}</title>
+</head>
+<body style="margin:0; padding:0; background:#f4f6f8;
+             font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+             color:#1a1a1a; -webkit-text-size-adjust:100%;">
+
+  {# Preheader: the grey line clients show beside the subject. Hidden in body. #}
+  <div style="display:none; max-height:0; overflow:hidden; opacity:0;">
+    {{ preheader }}
+  </div>
+
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+         style="background:#f4f6f8;">
+    <tr>
+      <td align="center" style="padding:24px 12px;">
+
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+               style="max-width:600px; background:#ffffff; border-radius:10px;
+                      overflow:hidden; border:1px solid #e2e7ee;">
+
+          <tr>
+            <td style="padding:26px 28px 18px; border-bottom:3px solid {{ brand.primary }};">
+              <div style="font-size:19px; font-weight:700; letter-spacing:-0.01em;">
+                {{ brand.name }}
+              </div>
+              {% if brand.slogan %}
+                <div style="font-size:12px; color:#5f6b7a; padding-top:3px;">
+                  {{ brand.slogan }}
+                </div>
+              {% endif %}
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:26px 28px 6px;">
+              {% block content %}{% endblock %}
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:18px 28px 26px; border-top:1px solid #e2e7ee;
+                       font-size:12px; line-height:1.6; color:#5f6b7a;">
+              <div style="font-weight:600; color:#1a1a1a;">{{ brand.name }}</div>
+              {% for line in brand.address_lines %}{{ line }}<br>{% endfor %}
+              {% if brand.phone %}{{ brand.phone }}<br>{% endif %}
+              {% if brand.email %}
+                <a href="mailto:{{ brand.email }}"
+                   style="color:{{ brand.primary }};">{{ brand.email }}</a><br>
+              {% endif %}
+              {% if brand.legal_footer %}
+                <div style="padding-top:10px; font-size:11px;">{{ brand.legal_footer }}</div>
+              {% endif %}
+            </td>
+          </tr>
+
+        </table>
+
+        <div style="max-width:600px; padding:14px 6px 0; font-size:11px;
+                    line-height:1.6; color:#8b95a3;">
+          {{ footer_note }}
+        </div>
+
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

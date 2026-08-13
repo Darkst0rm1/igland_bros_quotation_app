@@ -26,6 +26,27 @@ os.environ["MAX_FAILED_LOGINS"] = "3"
 os.environ["LOCKOUT_MINUTES"] = "15"
 os.environ["SESSION_TIMEOUT_MINUTES"] = "60"
 
+# Email: the capture backend, which sends nothing and cannot open a socket.
+#
+# Deliberately left **disabled**, matching production's safe default. Several
+# tests build a production ``Settings`` inline to check an unrelated rule, and
+# they inherit whatever is in this environment — so a global EMAIL_ENABLED here
+# would make the fail-closed email guard fire inside tests about portal URLs.
+# The email tests turn it on themselves, which is also where it belongs.
+os.environ["EMAIL_BACKEND"] = "memory"
+os.environ["EMAIL_FROM_ADDRESS"] = "quotes@test.invalid"
+os.environ["EMAIL_FROM_NAME"] = "Test Sender"
+os.environ["EMAIL_INTERNAL_RECIPIENTS"] = "ops@test.invalid"
+# Fixed keys, so a sealed payload is readable for the life of the process.
+# Obviously synthetic — repeated characters — and used only against the
+# temporary SQLite database above. Real keys are generated with
+# ``secret_box.generate_key()`` and live only in the environment.
+os.environ["EMAIL_PAYLOAD_KEYS"] = (
+    "t1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,"
+    "t2:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+)
+os.environ["EMAIL_PAYLOAD_KEY_VERSION"] = "t1"
+
 from modules import models  # noqa: E402,F401  (registers every table on Base)
 from modules.authorization import AuthUser, load_auth_user  # noqa: E402
 from modules.database import Base, get_engine, get_session  # noqa: E402

@@ -35,6 +35,7 @@ from sqlalchemy import (
     UniqueConstraint,
     event,
     func,
+    text,
 )
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB
@@ -42,6 +43,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
 
 from modules.constants import (
     AddressType,
+    ArtifactStatus,
     ContainerSize,
     ContainerType,
     FreightMethod,
@@ -51,11 +53,18 @@ from modules.constants import (
     ChargeType,
     CustomerResponse,
     CustomerStatus,
+    DocumentJobStatus,
+    EmailFailureCategory,
+    EmailMessageType,
+    EmailOutboxStatus,
     ImportJobStatus,
     ImportRowAction,
     ImportRowStatus,
+    ItemInclusion,
+    PortalResponseType,
     PricingBasis,
     QuotationStatus,
+    QuoteEventType,
     SendMethod,
     TermSection,
 )
@@ -756,6 +765,13 @@ class Quotation(Base, TimestampMixin, SoftDeleteMixin):
     gross_profit: Mapped[Decimal | None] = mapped_column(money())
     gross_margin_pct: Mapped[Decimal | None] = mapped_column(percentage())
 
+    #: Deposit requested up front, as a percentage of the grand total. Stored
+    #: as a rate rather than an amount so it cannot drift out of step with the
+    #: total when the quotation is revised; the money figure is derived.
+    deposit_pct: Mapped[Decimal] = mapped_column(
+        percentage(), nullable=False, default=Decimal("0"), server_default="0"
+    )
+
     requires_approval: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
     )
@@ -786,6 +802,17 @@ class Quotation(Base, TimestampMixin, SoftDeleteMixin):
     approvals: Mapped[list[Approval]] = relationship(back_populates="quotation")
     response_logs: Mapped[list[CustomerResponseLog]] = relationship(
         back_populates="quotation"
+    )
+    access_tokens: Mapped[list[QuoteAccessToken]] = relationship(
+        back_populates="quotation", cascade="all, delete-orphan"
+    )
+    quote_events: Mapped[list[QuoteEvent]] = relationship(
+        back_populates="quotation", cascade="all, delete-orphan",
+        order_by="QuoteEvent.occurred_at",
+    )
+    portal_responses: Mapped[list[PortalResponse]] = relationship(
+        back_populates="quotation", cascade="all, delete-orphan",
+        order_by="PortalResponse.submitted_at",
     )
 
     __table_args__ = (
@@ -821,6 +848,15 @@ class QuotationItem(Base, TimestampMixin):
     #: the denormalised prices below, this is what makes an issued quotation
     #: reproducible after the price list moves on.
     product_price_id: Mapped[int | None] = mapped_column(ForeignKey("product_prices.id"))
+
+    #: Included, Optional or Recommended. Only INCLUDED counts toward the
+    #: quotation total; the other two are offered to the customer and cost
+    #: nothing until they select them. Defaults to INCLUDED so every line
+    #: raised before the customer portal existed behaves exactly as before.
+    inclusion: Mapped[ItemInclusion] = mapped_column(
+        _enum(ItemInclusion), nullable=False, default=ItemInclusion.INCLUDED,
+        server_default=ItemInclusion.INCLUDED.value,
+    )
 
     is_custom_product: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     custom_description: Mapped[str | None] = mapped_column(Text)
@@ -1058,6 +1094,410 @@ class CustomerResponseLog(Base, TimestampMixin):
     created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
 
     quotation: Mapped[Quotation] = relationship(back_populates="response_logs")
+
+
+class QuoteAccessToken(Base, TimestampMixin):
+    """A customer's way in to one quotation, and nothing else.
+
+    **The token itself is never stored.** Only its SHA-256 hash is, so a leaked
+    database dump does not hand out working links. The plaintext is returned
+    once, at issue, and cannot be recovered afterwards — reissue instead.
+
+    Scoped to a single quotation by construction: the lookup is
+    hash -> token -> quotation, so there is no identifier a customer could edit
+    to reach someone else's quote.
+    """
+
+    __tablename__ = "quote_access_tokens"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    quotation_id: Mapped[int] = mapped_column(
+        ForeignKey("quotations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    #: SHA-256 of the plaintext token, hex encoded.
+    token_hash: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True, index=True
+    )
+    expires_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    first_viewed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    last_viewed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    view_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+
+    created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+
+    quotation: Mapped[Quotation] = relationship(back_populates="access_tokens")
+
+    def is_usable(self, now: dt.datetime | None = None) -> bool:
+        """Live, not revoked, not expired."""
+        now = now or dt.datetime.now(dt.UTC)
+        if self.revoked_at is not None:
+            return False
+        if self.expires_at is not None:
+            expires = self.expires_at
+            if expires.tzinfo is None:      # SQLite hands back naive datetimes
+                expires = expires.replace(tzinfo=dt.UTC)
+            if expires <= now:
+                return False
+        return True
+
+
+class QuoteEvent(Base):
+    """Something that happened to a quotation's public link.
+
+    Deliberately holds no IP address, user agent or other identifier: the
+    business question is "was it opened, and when", which a timestamp answers.
+    Collecting more would be personal data the company has no use for.
+    """
+
+    __tablename__ = "quote_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    quotation_id: Mapped[int] = mapped_column(
+        ForeignKey("quotations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    access_token_id: Mapped[int | None] = mapped_column(
+        ForeignKey("quote_access_tokens.id", ondelete="SET NULL"), index=True
+    )
+    event_type: Mapped[QuoteEventType] = mapped_column(
+        _enum(QuoteEventType), nullable=False, index=True
+    )
+    occurred_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.UTC)
+    )
+    #: Small, non-identifying context — revision number, reason for a denial.
+    detail_json: Mapped[Any | None] = mapped_column(JSONType)
+
+    quotation: Mapped[Quotation] = relationship(back_populates="quote_events")
+
+    __table_args__ = (
+        Index("ix_quote_events_quotation_type", "quotation_id", "event_type"),
+    )
+
+
+class PortalResponse(Base):
+    """What the customer submitted, and the totals they were shown when they did.
+
+    The money columns are a **snapshot taken server-side at submission**, not
+    figures posted by the browser. They exist so that "what did they actually
+    agree to" survives any later revision of the quotation.
+    """
+
+    __tablename__ = "portal_responses"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    quotation_id: Mapped[int] = mapped_column(
+        ForeignKey("quotations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    access_token_id: Mapped[int | None] = mapped_column(
+        ForeignKey("quote_access_tokens.id", ondelete="SET NULL")
+    )
+    #: The revision the customer was looking at, so a later revision cannot be
+    #: mistaken for the one they accepted.
+    revision_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    response_type: Mapped[PortalResponseType] = mapped_column(
+        _enum(PortalResponseType), nullable=False, index=True
+    )
+
+    customer_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    job_title: Mapped[str | None] = mapped_column(String(120))
+    customer_email: Mapped[str | None] = mapped_column(String(255))
+    comment: Mapped[str | None] = mapped_column(Text)
+
+    #: Typed signature. Kept distinct from customer_name: a person may sign in
+    #: a different form from the name they entered, and both are evidence.
+    signature_name: Mapped[str | None] = mapped_column(String(160))
+    accepted_terms: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
+
+    #: QuotationItem ids the customer chose to add. Included lines are not
+    #: listed — they were never optional.
+    selected_item_ids: Mapped[Any | None] = mapped_column(JSONType)
+
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
+    subtotal: Mapped[Decimal] = mapped_column(money(), nullable=False, default=Decimal("0"))
+    tax_amount: Mapped[Decimal] = mapped_column(money(), nullable=False, default=Decimal("0"))
+    grand_total: Mapped[Decimal] = mapped_column(money(), nullable=False, default=Decimal("0"))
+
+    attachment_key: Mapped[str | None] = mapped_column(String(500))
+    #: One-time value carried by the submitted form. Unique, so a replayed POST
+    #: violates the constraint instead of recording a second response.
+    submission_nonce: Mapped[str | None] = mapped_column(String(64), unique=True)
+    submitted_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.UTC)
+    )
+
+    quotation: Mapped[Quotation] = relationship(back_populates="portal_responses")
+
+    __table_args__ = (
+        # Exactly one acceptance per revision, enforced by the database rather
+        # than by a check-then-write in the service: two simultaneous approvals
+        # race, and only one can commit.
+        Index(
+            "uq_portal_responses_one_approval_per_revision",
+            "quotation_id", "revision_no",
+            unique=True,
+            sqlite_where=text("response_type = 'APPROVED'"),
+            postgresql_where=text("response_type = 'APPROVED'"),
+        ),
+    )
+
+
+class QuoteDocumentArtifact(Base):
+    """The one final PDF of one accepted quotation.
+
+    Immutable by policy and by guard: once a row exists, the bytes it describes
+    are what the customer accepted, and neither the key, the hash nor the size
+    may be rewritten. Regenerating is not a thing that happens — if the stored
+    object stops matching, the row is quarantined and investigated, because a
+    silently regenerated "accepted" document is a rewritten agreement.
+
+    ``storage_key`` is derived from the accepted response's own identity, never
+    from anything a customer supplied, so a retry lands on the same object and
+    can adopt bytes an earlier attempt already wrote instead of duplicating
+    them. No public URL is ever derived from it; retrieval goes through the
+    validated portal route, which verifies hash and size first.
+    """
+
+    __tablename__ = "quote_document_artifacts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: Unique: one accepted response has exactly one final document.
+    portal_response_id: Mapped[int] = mapped_column(
+        ForeignKey("portal_responses.id", ondelete="CASCADE"),
+        nullable=False, unique=True,
+    )
+    quotation_id: Mapped[int] = mapped_column(
+        ForeignKey("quotations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    #: The revision that was accepted, carried here too so the artifact can be
+    #: matched to it without loading the response.
+    revision_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    storage_key: Mapped[str] = mapped_column(String(500), nullable=False, unique=True)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    generated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        default=lambda: dt.datetime.now(dt.UTC),
+    )
+    #: Which template produced these bytes, so an artifact made by an older
+    #: renderer is identifiable rather than assumed current.
+    generator_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    status: Mapped[ArtifactStatus] = mapped_column(
+        _enum(ArtifactStatus), nullable=False, default=ArtifactStatus.READY
+    )
+    #: Set only when quarantined. Internal; never shown to a customer.
+    quarantine_reason: Mapped[str | None] = mapped_column(Text)
+
+    response: Mapped[PortalResponse] = relationship()
+
+
+class QuoteDocumentJob(Base):
+    """The durable intent to produce one accepted PDF.
+
+    Written in the same transaction as the acceptance, so an accepted quotation
+    always has a job even if the renderer or object storage is down at that
+    moment. Acceptance never waits for it and never fails because of it: the
+    customer's decision is the business event, and the PDF is a consequence.
+
+    Bounded: after ``MAX_ATTEMPTS`` the job stops retrying and asks for a human,
+    rather than hammering a broken backend forever.
+    """
+
+    __tablename__ = "quote_document_jobs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: Unique, so enqueueing twice for the same acceptance is a no-op rather
+    #: than two workers producing two documents.
+    portal_response_id: Mapped[int] = mapped_column(
+        ForeignKey("portal_responses.id", ondelete="CASCADE"),
+        nullable=False, unique=True,
+    )
+    quotation_id: Mapped[int] = mapped_column(
+        ForeignKey("quotations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    revision_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    status: Mapped[DocumentJobStatus] = mapped_column(
+        _enum(DocumentJobStatus), nullable=False,
+        default=DocumentJobStatus.PENDING, index=True,
+    )
+    attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    #: Internal diagnostics. Never rendered to an employee or a customer.
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+    #: A short lease, so two workers do not render the same document at once.
+    #: The unique index on the artifact is the hard guarantee; this is what
+    #: stops the wasted work and the racing writes that would need it.
+    lock_owner: Mapped[str | None] = mapped_column(String(64))
+    locked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        default=lambda: dt.datetime.now(dt.UTC),
+    )
+    last_attempt_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    response: Mapped[PortalResponse] = relationship()
+
+
+class EmailOutbox(Base):
+    """A delivery intent, written inside the transaction that caused it.
+
+    The point of a database-backed outbox is that sending and the business
+    event cannot be made atomic. An SMTP call inside the approval transaction
+    would either hold the transaction open across a network round trip, or send
+    a confirmation for an approval that then rolled back. So the *intent* is
+    committed with the event, and the sending happens afterwards, from here.
+
+    Everything the message needs is snapshotted onto the row — brand, totals,
+    recipient, revision — rather than re-read at send time. A quotation revised
+    between queueing and sending must not silently change what the email says
+    it is about.
+
+    ``secure_payload`` is the one exception to the portal's "no plaintext
+    tokens" rule, and it is not really an exception: it holds the customer's
+    capability URL sealed with AES-256-GCM under a key that lives only in the
+    environment, bound to this quotation, revision, recipient and purpose. A
+    database disclosure still yields no working link. It is erased once the
+    message is sent or the resend window closes.
+    """
+
+    __tablename__ = "email_outbox"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    message_type: Mapped[EmailMessageType] = mapped_column(
+        _enum(EmailMessageType), nullable=False, index=True
+    )
+    quotation_id: Mapped[int] = mapped_column(
+        ForeignKey("quotations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    #: The revision this message is about. Carried explicitly so a retry sends
+    #: what was intended, not what the quotation has since become.
+    revision_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    portal_response_id: Mapped[int | None] = mapped_column(
+        ForeignKey("portal_responses.id", ondelete="SET NULL")
+    )
+
+    recipient_email: Mapped[str] = mapped_column(String(255), nullable=False)
+    recipient_name: Mapped[str | None] = mapped_column(String(160))
+    #: Rendered at enqueue so an employee can see what went out without the row
+    #: having to hold a body. Contains no secret: the link lives only in the
+    #: sealed payload.
+    subject: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+
+    #: How the company presented itself when this was queued. A rebrand between
+    #: queueing and sending must not restyle a message about an old quotation.
+    brand_snapshot_json: Mapped[Any | None] = mapped_column(JSONType)
+    #: Everything the template needs, already customer-safe. Rendering reads
+    #: this and the brand snapshot and nothing else.
+    template_data_json: Mapped[Any | None] = mapped_column(JSONType)
+
+    #: Unique. Derived from what the message *is*, so enqueueing the same
+    #: notification twice is a no-op rather than two emails to a customer.
+    idempotency_key: Mapped[str] = mapped_column(
+        String(120), nullable=False, unique=True
+    )
+
+    status: Mapped[EmailOutboxStatus] = mapped_column(
+        _enum(EmailOutboxStatus), nullable=False,
+        default=EmailOutboxStatus.QUEUED, index=True,
+    )
+    attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    #: When this row becomes eligible again. Backoff is expressed here rather
+    #: than by sleeping, so a worker restart does not lose the schedule.
+    next_attempt_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+
+    lease_owner: Mapped[str | None] = mapped_column(String(64))
+    lease_expires_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    queued_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        default=lambda: dt.datetime.now(dt.UTC),
+    )
+    last_attempt_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    sent_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    failed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    #: Whatever reference the provider gave back, when it gave one.
+    provider_message_id: Mapped[str | None] = mapped_column(String(255))
+    failure_category: Mapped[EmailFailureCategory | None] = mapped_column(
+        _enum(EmailFailureCategory)
+    )
+    #: A short token such as "smtp_451" or "invalid_recipient". Never the
+    #: provider's own text, which quotes the recipient and subject back and
+    #: would then be stored and shown.
+    failure_code: Mapped[str | None] = mapped_column(String(60))
+
+    #: Sealed capability URL. Never plaintext, never logged, never in a repr.
+    secure_payload: Mapped[str | None] = mapped_column(Text)
+    #: After this the payload is erased and the message can no longer be sent.
+    secure_payload_expires_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+    quotation: Mapped[Quotation] = relationship()
+
+    __table_args__ = (
+        Index("ix_email_outbox_status_next", "status", "next_attempt_at"),
+        Index("ix_email_outbox_quotation_type", "quotation_id", "message_type"),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        # Never the payload, never the template data. Both can carry the link.
+        return (
+            f"<EmailOutbox id={self.id} type={self.message_type} "
+            f"status={self.status} attempts={self.attempts}>"
+        )
+
+    @property
+    def has_secure_payload(self) -> bool:
+        return bool(self.secure_payload)
+
+
+class StorageCleanup(Base):
+    """An object that should be deleted, once the database says it is safe to.
+
+    Exists because deleting a storage object and committing a database change
+    are two systems that cannot be made atomic. The order that survives failure
+    is: write the new reference, commit it, *then* retire the old object — and
+    if that last step fails, the object must not be forgotten.
+
+    A row here means "the database no longer references this key". Deletion is
+    retried later; repeating it is harmless because removing an object that is
+    already gone succeeds.
+    """
+
+    __tablename__ = "storage_cleanups"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: Unique, so queueing the same key twice cannot create duplicate work.
+    storage_key: Mapped[str] = mapped_column(String(500), nullable=False, unique=True)
+    reason: Mapped[str | None] = mapped_column(String(120))
+    attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        default=lambda: dt.datetime.now(dt.UTC),
+    )
+    last_attempt_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Attachment(Base):
@@ -1511,6 +1951,12 @@ _COST_IMMUTABLE_FIELDS = frozenset({
     "effective_from",
 })
 
+#: An accepted document's identity and contents never change. What stays
+#: writable is only the verdict on it: quarantining a row whose object no
+#: longer matches, and the note saying why. Regeneration is deliberately not
+#: possible — a rewritten "accepted" PDF is a rewritten agreement.
+_ARTIFACT_WRITABLE = frozenset({"status", "quarantine_reason"})
+
 
 def _changed_fields(session: Any, obj: Any) -> set[str]:
     """Names of attributes with a pending change on ``obj``."""
@@ -1568,6 +2014,15 @@ def _guard_immutability(session: Session, _flush_context: Any, _instances: Any) 
             raise ImmutableRecordError(
                 f"Revision snapshot #{obj.id} is immutable and cannot be edited."
             )
+
+        elif isinstance(obj, QuoteDocumentArtifact):
+            illegal = _changed_fields(session, obj) - _ARTIFACT_WRITABLE
+            if illegal:
+                raise ImmutableRecordError(
+                    f"Accepted document #{obj.id} records what a customer agreed "
+                    f"to and cannot be rewritten ({', '.join(sorted(illegal))}). "
+                    "Quarantine it instead."
+                )
 
         elif isinstance(obj, QuotationShipment):
             parent = obj.quotation

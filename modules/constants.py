@@ -70,6 +70,28 @@ class Perm(StrEnum):
     #: actually sent to a customer, which the ordinary delete must not touch.
     QUOTE_DELETE_ANY = "quote.delete_any"
 
+    # Customer portal. Deliberately separate from the pricing permissions: a
+    # Pricing Administrator may set prices on any quotation and still have no
+    # way to publish one to a customer, revoke a live link, or read what a
+    # customer signed. Publishing is a different act from pricing.
+    QUOTE_PORTAL_LINK_ISSUE = "quote.portal_link_issue"
+    QUOTE_PORTAL_LINK_REVOKE = "quote.portal_link_revoke"
+    QUOTE_PORTAL_PREVIEW = "quote.portal_preview"
+    QUOTE_PORTAL_VIEW_RESPONSE = "quote.portal_view_response"
+    #: Email a quotation to a customer. Separate from issuing a link, because
+    #: they are different acts: a link can be generated, previewed and thrown
+    #: away, while a sent message has left the building and cannot be recalled.
+    QUOTE_PORTAL_SEND = "quote.portal_send"
+    #: Push a failed delivery back into the queue. Narrower than sending — it
+    #: cannot change who receives it or what they receive — so a manager can
+    #: unstick a queue without gaining the ability to mail a customer something
+    #: new.
+    QUOTE_PORTAL_RETRY = "quote.portal_retry"
+    #: See what was sent, to whom and whether it arrived. Read-only, and granted
+    #: to Finance, who need to know a quotation reached the customer without
+    #: being able to send one.
+    QUOTE_PORTAL_VIEW_DELIVERY = "quote.portal_view_delivery"
+
     # Internal financials
     COST_VIEW = "cost.view"
     COST_MANAGE = "cost.manage"
@@ -126,6 +148,10 @@ PERMISSION_CATEGORIES: dict[Perm, str] = {
         Perm.QUOTE_APPROVE_CUSTOM_PRICE, Perm.QUOTE_GENERATE_PDF,
         Perm.QUOTE_UPDATE_STATUS, Perm.QUOTE_CREATE_REVISION, Perm.QUOTE_CANCEL,
         Perm.QUOTE_EXPORT, Perm.QUOTE_DELETE_DRAFT, Perm.QUOTE_DELETE_ANY,
+        Perm.QUOTE_PORTAL_LINK_ISSUE, Perm.QUOTE_PORTAL_LINK_REVOKE,
+        Perm.QUOTE_PORTAL_PREVIEW, Perm.QUOTE_PORTAL_VIEW_RESPONSE,
+        Perm.QUOTE_PORTAL_SEND, Perm.QUOTE_PORTAL_RETRY,
+        Perm.QUOTE_PORTAL_VIEW_DELIVERY,
     )},
     **{p: "Internal financials" for p in (
         Perm.COST_VIEW, Perm.COST_MANAGE, Perm.MARGIN_VIEW,
@@ -163,6 +189,9 @@ ROLE_PERMISSIONS: dict[RoleCode, frozenset[Perm]] = {
         Perm.QUOTE_SUBMIT_FOR_APPROVAL, Perm.QUOTE_GENERATE_PDF,
         Perm.QUOTE_UPDATE_STATUS, Perm.QUOTE_CREATE_REVISION, Perm.QUOTE_EXPORT,
         Perm.QUOTE_DELETE_DRAFT,
+        Perm.QUOTE_PORTAL_LINK_ISSUE, Perm.QUOTE_PORTAL_LINK_REVOKE,
+        Perm.QUOTE_PORTAL_PREVIEW, Perm.QUOTE_PORTAL_VIEW_RESPONSE,
+        Perm.QUOTE_PORTAL_SEND, Perm.QUOTE_PORTAL_VIEW_DELIVERY,
         Perm.CUSTOMER_VIEW, Perm.CUSTOMER_CREATE, Perm.CUSTOMER_EDIT,
         Perm.PRODUCT_VIEW, Perm.PRICE_VIEW,
         Perm.SHIPMENT_EDIT,
@@ -176,6 +205,10 @@ ROLE_PERMISSIONS: dict[RoleCode, frozenset[Perm]] = {
         Perm.QUOTE_APPROVE_CUSTOM_PRICE, Perm.QUOTE_GENERATE_PDF,
         Perm.QUOTE_UPDATE_STATUS, Perm.QUOTE_CREATE_REVISION, Perm.QUOTE_CANCEL,
         Perm.QUOTE_EXPORT, Perm.QUOTE_DELETE_DRAFT,
+        Perm.QUOTE_PORTAL_LINK_ISSUE, Perm.QUOTE_PORTAL_LINK_REVOKE,
+        Perm.QUOTE_PORTAL_PREVIEW, Perm.QUOTE_PORTAL_VIEW_RESPONSE,
+        Perm.QUOTE_PORTAL_SEND, Perm.QUOTE_PORTAL_RETRY,
+        Perm.QUOTE_PORTAL_VIEW_DELIVERY,
         Perm.COST_VIEW, Perm.MARGIN_VIEW,
         Perm.CUSTOMER_VIEW, Perm.CUSTOMER_CREATE, Perm.CUSTOMER_EDIT, Perm.CUSTOMER_DELETE,
         Perm.PRODUCT_VIEW, Perm.PRICE_VIEW,
@@ -186,6 +219,9 @@ ROLE_PERMISSIONS: dict[RoleCode, frozenset[Perm]] = {
     }),
     RoleCode.FINANCE: frozenset({
         Perm.QUOTE_VIEW_OWN, Perm.QUOTE_VIEW_TEAM, Perm.QUOTE_VIEW_ALL,
+        # Read what a customer agreed to, and whether the quotation actually
+        # reached them — but no ability to publish, revoke, send or retry.
+        Perm.QUOTE_PORTAL_VIEW_RESPONSE, Perm.QUOTE_PORTAL_VIEW_DELIVERY,
         Perm.QUOTE_APPROVE_CUSTOM_PRICE, Perm.QUOTE_GENERATE_PDF, Perm.QUOTE_EXPORT,
         Perm.COST_VIEW, Perm.COST_MANAGE, Perm.MARGIN_VIEW,
         Perm.CUSTOMER_VIEW, Perm.CUSTOMER_CREATE, Perm.CUSTOMER_EDIT,
@@ -583,6 +619,185 @@ class AddressType(StrEnum):
     SHIPPING = "SHIPPING"
 
 
+class ItemInclusion(StrEnum):
+    """Whether a quotation line is part of the price, or offered alongside it.
+
+    ``INCLUDED`` is the default and the only value existing rows carry, so the
+    behaviour of every quotation raised before the customer portal existed is
+    unchanged: everything counts toward the total.
+
+    ``OPTIONAL`` and ``RECOMMENDED`` differ only in how they are presented —
+    both are excluded from the total until the customer selects them, and
+    neither is recorded as accepted until a response is submitted.
+    """
+
+    INCLUDED = "INCLUDED"
+    OPTIONAL = "OPTIONAL"
+    RECOMMENDED = "RECOMMENDED"
+
+
+#: Lines the customer may choose. Everything else is part of the offer.
+SELECTABLE_INCLUSIONS: frozenset[ItemInclusion] = frozenset({
+    ItemInclusion.OPTIONAL,
+    ItemInclusion.RECOMMENDED,
+})
+
+INCLUSION_DISPLAY_NAMES: dict[ItemInclusion, str] = {
+    ItemInclusion.INCLUDED: "Included",
+    ItemInclusion.OPTIONAL: "Optional",
+    ItemInclusion.RECOMMENDED: "Recommended",
+}
+
+
+class QuoteEventType(StrEnum):
+    """What happened to a quotation's public link.
+
+    Kept separate from ``QuotationStatus``: the internal lifecycle is a state
+    machine with a transition table, while these are facts that accumulate.
+    Recording "viewed" as a status would mean editing STATUS_TRANSITIONS and
+    destabilising the approval workflow for something that is only a timestamp.
+    """
+
+    LINK_ISSUED = "LINK_ISSUED"
+    LINK_REVOKED = "LINK_REVOKED"
+    VIEWED = "VIEWED"
+    PDF_DOWNLOADED = "PDF_DOWNLOADED"
+    # Queued and delivered are separate facts. A message can sit in the outbox
+    # for minutes, and "we told the customer" is only true of the second one.
+    # Neither is a view: an email leaving the building says nothing about
+    # whether anybody opened the quotation.
+    EMAIL_QUEUED = "EMAIL_QUEUED"
+    EMAIL_SENT = "EMAIL_SENT"
+    EMAIL_FAILED = "EMAIL_FAILED"
+    #: An employee pushed a failed delivery back into the queue. Distinct from
+    #: EMAIL_RESENT: a retry sends the same message to the same person with the
+    #: same link, while a resend replaces the customer's way in.
+    EMAIL_RETRY_SCHEDULED = "EMAIL_RETRY_SCHEDULED"
+    #: A new link was issued and the previous one revoked. The customer's old
+    #: URL stops working at this point, which is why it is its own event.
+    EMAIL_RESENT = "EMAIL_RESENT"
+    APPROVED = "APPROVED"
+    CHANGES_REQUESTED = "CHANGES_REQUESTED"
+    ACCESS_DENIED = "ACCESS_DENIED"
+
+
+class PortalResponseType(StrEnum):
+    """What the customer submitted through the portal."""
+
+    APPROVED = "APPROVED"
+    CHANGES_REQUESTED = "CHANGES_REQUESTED"
+
+
+class DocumentJobStatus(StrEnum):
+    """How the accepted-PDF job for one acceptance is getting on.
+
+    Three states because three is what an employee needs to act: it is coming,
+    it is here, or it needs somebody. The reason a job failed is recorded but
+    is not one of these — an employee is told the state, never the internals.
+    """
+
+    PENDING = "PENDING"
+    READY = "READY"
+    FAILED = "FAILED"
+
+
+class ArtifactStatus(StrEnum):
+    """Whether stored bytes may still be served.
+
+    ``QUARANTINED`` is set when the stored object stops matching the hash and
+    size recorded when it was written. The row is never deleted and never
+    overwritten: it is the evidence that something changed bytes that were
+    supposed to be immutable, and it must survive to be investigated.
+    """
+
+    READY = "READY"
+    QUARANTINED = "QUARANTINED"
+
+
+#: How employees see a job state. Deliberately plain, with no error detail.
+DOCUMENT_JOB_DISPLAY_NAMES: dict[DocumentJobStatus, str] = {
+    DocumentJobStatus.PENDING: "Preparing",
+    DocumentJobStatus.READY: "Ready",
+    DocumentJobStatus.FAILED: "Needs attention",
+}
+
+
+class EmailMessageType(StrEnum):
+    """Which of the six messages an outbox row is.
+
+    Split into customer-facing and internal, because the two have different
+    rules: a customer message carries the capability URL and never an internal
+    figure, an internal message carries neither the URL nor anything a customer
+    would need.
+    """
+
+    QUOTE_INVITATION = "QUOTE_INVITATION"
+    QUOTE_REVISED_INVITATION = "QUOTE_REVISED_INVITATION"
+    CUSTOMER_APPROVAL_CONFIRMATION = "CUSTOMER_APPROVAL_CONFIRMATION"
+    CUSTOMER_CHANGES_CONFIRMATION = "CUSTOMER_CHANGES_CONFIRMATION"
+    INTERNAL_APPROVAL_NOTICE = "INTERNAL_APPROVAL_NOTICE"
+    INTERNAL_CHANGES_NOTICE = "INTERNAL_CHANGES_NOTICE"
+
+
+#: The messages that carry a customer's capability URL. Everything else must
+#: never be given one — asserted by the test suite against the rendered bodies.
+LINK_BEARING_MESSAGES: frozenset[EmailMessageType] = frozenset({
+    EmailMessageType.QUOTE_INVITATION,
+    EmailMessageType.QUOTE_REVISED_INVITATION,
+})
+
+#: Messages that go to employees rather than to the customer.
+INTERNAL_MESSAGES: frozenset[EmailMessageType] = frozenset({
+    EmailMessageType.INTERNAL_APPROVAL_NOTICE,
+    EmailMessageType.INTERNAL_CHANGES_NOTICE,
+})
+
+EMAIL_MESSAGE_DISPLAY_NAMES: dict[EmailMessageType, str] = {
+    EmailMessageType.QUOTE_INVITATION: "Quotation sent",
+    EmailMessageType.QUOTE_REVISED_INVITATION: "Revised quotation sent",
+    EmailMessageType.CUSTOMER_APPROVAL_CONFIRMATION: "Acceptance confirmation",
+    EmailMessageType.CUSTOMER_CHANGES_CONFIRMATION: "Change request confirmation",
+    EmailMessageType.INTERNAL_APPROVAL_NOTICE: "Internal: quotation accepted",
+    EmailMessageType.INTERNAL_CHANGES_NOTICE: "Internal: changes requested",
+}
+
+
+class EmailOutboxStatus(StrEnum):
+    """Where a queued message has got to.
+
+    ``SENDING`` exists so a row a worker is holding is distinguishable from one
+    waiting to be picked up — an employee looking at a stuck queue needs to see
+    the difference between "nothing is working on this" and "something is".
+    """
+
+    QUEUED = "QUEUED"
+    SENDING = "SENDING"
+    SENT = "SENT"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+EMAIL_STATUS_DISPLAY_NAMES: dict[EmailOutboxStatus, str] = {
+    EmailOutboxStatus.QUEUED: "Queued",
+    EmailOutboxStatus.SENDING: "Sending",
+    EmailOutboxStatus.SENT: "Sent",
+    EmailOutboxStatus.FAILED: "Failed",
+    EmailOutboxStatus.CANCELLED: "Cancelled",
+}
+
+
+class EmailFailureCategory(StrEnum):
+    """Whether a failure is worth trying again.
+
+    A greylisting relay and a malformed address both "failed to send", and
+    treating them the same means either giving up on deliverable mail or
+    retrying undeliverable mail until the attempt limit.
+    """
+
+    TEMPORARY = "TEMPORARY"
+    PERMANENT = "PERMANENT"
+
+
 class SendMethod(StrEnum):
     EMAIL = "EMAIL"
     COURIER = "COURIER"
@@ -645,6 +860,13 @@ class AuditAction(StrEnum):
     REJECTED = "REJECTED"
     WARNING_OVERRIDDEN = "WARNING_OVERRIDDEN"
     PDF_GENERATED = "PDF_GENERATED"
+    QUOTE_LINK_ISSUED = "QUOTE_LINK_ISSUED"
+    QUOTE_LINK_REVOKED = "QUOTE_LINK_REVOKED"
+    CUSTOMER_APPROVED = "CUSTOMER_APPROVED"
+    CUSTOMER_REQUESTED_CHANGES = "CUSTOMER_REQUESTED_CHANGES"
+    EMAIL_QUEUED = "EMAIL_QUEUED"
+    EMAIL_SENT = "EMAIL_SENT"
+    EMAIL_FAILED = "EMAIL_FAILED"
     STATUS_CHANGED = "STATUS_CHANGED"
     REVISION_CREATED = "REVISION_CREATED"
     CUSTOMER_RESPONSE_LOGGED = "CUSTOMER_RESPONSE_LOGGED"

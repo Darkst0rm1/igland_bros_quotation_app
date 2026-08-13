@@ -118,6 +118,94 @@ class Settings(BaseSettings):
     storage_access_key_id: str = ""
     storage_secret_access_key: str = ""
 
+    # --- Customer portal (the separate public service) ---------------------
+    #: Public base URL the customer's link points at, e.g.
+    #: https://quotes.iglandbros.com. Used to build links and to validate the
+    #: Origin of state-changing requests. Never hardcoded anywhere.
+    portal_base_url: str = ""
+    #: Shown on the portal's "link not available" page so a customer who
+    #: hits an expired link knows who to contact. Optional.
+    portal_support_email: str = ""
+    #: How long a customer link stays live when the quotation carries no
+    #: validity date of its own.
+    portal_link_days: int = Field(default=30, ge=1, le=365)
+
+    # --- Portal branding ---------------------------------------------------
+    # Identity — legal name, address, phone, email, logo — always comes from
+    # CompanySettings in the database. These override only how the brand is
+    # *presented*, so the portal is not wired to one company. Blank means "use
+    # the company identity", which is the default.
+    #
+    # Migration path when brand needs to vary per quotation rather than per
+    # deployment: add a nullable ``quotations.brand_code`` and resolve the
+    # profile from it, falling back to these values. No portal code changes
+    # shape; only the lookup gains a row to read.
+    portal_brand_name: str = ""
+    portal_brand_slogan: str = ""
+    portal_brand_legal_footer: str = ""
+    portal_brand_primary: str = ""
+    portal_brand_secondary: str = ""
+    portal_brand_accent: str = ""
+    #: Fixed-window rate limits. Generous enough that a customer refreshing or
+    #: sharing the link with a colleague is never affected.
+    portal_view_rate_per_minute: int = Field(default=60, ge=1, le=1000)
+    portal_submit_rate_per_hour: int = Field(default=10, ge=1, le=200)
+
+    # --- Email delivery ----------------------------------------------------
+    #: The backend actually used. "memory" captures and sends nothing (tests),
+    #: "console" logs a redacted summary and cannot open a socket (development),
+    #: "smtp" is the only one that reaches the internet.
+    email_backend: Literal["memory", "console", "smtp"] = "console"
+    #: Master switch. With this off, messages are still queued — the durable
+    #: intent is the business record — but the worker leaves them alone. That is
+    #: deliberately not the same as deleting them: turning sending back on
+    #: should deliver what accumulated, not silently drop it.
+    email_enabled: bool = False
+
+    email_from_address: str = ""
+    email_from_name: str = ""
+    #: Where a customer's reply goes, when it should not go to the From address.
+    email_reply_to: str = ""
+    #: Internal notifications — approvals and change requests — land here.
+    #: Comma-separated; blank means internal notifications are not queued.
+    email_internal_recipients: str = ""
+
+    smtp_host: str = ""
+    smtp_port: int = Field(default=587, ge=1, le=65535)
+    smtp_username: str = ""
+    smtp_password: str = ""
+    #: "starttls" upgrades a plain connection, "tls" connects wrapped. There is
+    #: deliberately no "none": an unencrypted SMTP session carries the
+    #: credentials and the customer's link in clear text.
+    smtp_security: Literal["starttls", "tls"] = "starttls"
+    smtp_timeout_seconds: int = Field(default=20, ge=1, le=120)
+
+    #: Versioned keys for sealing the capability payload an invitation needs:
+    #: ``v1:base64key,v2:base64key``. Rotation means adding a version and
+    #: pointing EMAIL_PAYLOAD_KEY_VERSION at it; the old key stays so rows
+    #: queued under it can still be opened.
+    email_payload_keys: str = ""
+    email_payload_key_version: str = ""
+    #: How long a sealed invitation payload stays openable. After this the row
+    #: can no longer be sent or resent and the ciphertext is erased, so a link
+    #: cannot be resurrected from an old queue row indefinitely.
+    email_payload_ttl_hours: int = Field(default=72, ge=1, le=720)
+
+    #: Delivery attempts before a message is given up on and shown as failed.
+    email_max_attempts: int = Field(default=6, ge=1, le=20)
+
+    # --- Background worker -------------------------------------------------
+    #: Seconds between sweeps in continuous mode.
+    worker_poll_seconds: int = Field(default=30, ge=5, le=3600)
+    #: How many rows each subsystem takes per sweep.
+    worker_batch_size: int = Field(default=20, ge=1, le=500)
+    #: How long a worker's claim on a row is honoured before another may take it.
+    worker_lease_seconds: int = Field(default=300, ge=30, le=3600)
+    #: A health signal older than this is reported to employees as stale. Wider
+    #: than the poll interval on purpose: a worker that misses one sweep has not
+    #: stopped, and an indicator that cries wolf gets ignored.
+    worker_stale_after_seconds: int = Field(default=900, ge=60, le=86400)
+
     # --- Uploads ----------------------------------------------------------
     max_upload_mb: int = Field(default=10, ge=1, le=100)
     allowed_upload_extensions: str = ".xlsx,.xls,.png,.jpg,.jpeg,.pdf"
@@ -165,11 +253,47 @@ class Settings(BaseSettings):
                 "required when STORAGE_BACKEND=s3"
             )
 
+        problems += self._email_problems()
+
         if problems:
             raise ValueError(
                 "Invalid production configuration:\n  - " + "\n  - ".join(problems)
             )
         return self
+
+    def _email_problems(self) -> list[str]:
+        """Fail closed: sending enabled but unconfigured must stop the process.
+
+        Only checked when sending is actually enabled. A production deployment
+        that has not turned email on yet is a normal state, not a fault — the
+        outbox fills up and waits, which is the behaviour the durable queue
+        exists to provide.
+        """
+        if not self.email_enabled:
+            return []
+
+        problems: list[str] = []
+        if self.email_backend != "smtp":
+            problems.append(
+                "EMAIL_BACKEND must be 'smtp' when EMAIL_ENABLED is true in "
+                "production — 'memory' and 'console' deliver nothing, so a "
+                "customer would never receive their quotation"
+            )
+        if not self.email_from_address:
+            problems.append("EMAIL_FROM_ADDRESS is required when email is enabled")
+        if self.email_backend == "smtp":
+            if not self.smtp_host:
+                problems.append("SMTP_HOST is required when EMAIL_BACKEND=smtp")
+            # No check for a password: some relays authorise by IP or by
+            # submission certificate, and demanding one would block a valid
+            # setup. The transport security check below is the one that matters.
+        if not self.email_payload_keys:
+            problems.append(
+                "EMAIL_PAYLOAD_KEYS is required when email is enabled — the "
+                "invitation carries a capability URL, which is never stored in "
+                "clear text"
+            )
+        return problems
 
     # ------------------------------------------------------------------ #
     # Convenience accessors
@@ -191,6 +315,15 @@ class Settings(BaseSettings):
     def allowed_extensions(self) -> frozenset[str]:
         return frozenset(self.allowed_upload_extensions.split(","))
 
+    @property
+    def internal_recipients(self) -> tuple[str, ...]:
+        """Internal notification addresses, split and cleaned."""
+        return tuple(
+            part.strip()
+            for part in (self.email_internal_recipients or "").split(",")
+            if part.strip()
+        )
+
     def redacted(self) -> dict[str, Any]:
         """Settings safe to display on a diagnostics screen."""
         secret_fields = {
@@ -198,6 +331,11 @@ class Settings(BaseSettings):
             "storage_secret_access_key",
             "storage_access_key_id",
             "database_url",
+            # Credentials and key material. A diagnostics screen is exactly the
+            # sort of place these leak from — it is meant to be looked at.
+            "smtp_password",
+            "smtp_username",
+            "email_payload_keys",
         }
         out: dict[str, Any] = {}
         for name in self.__class__.model_fields:
