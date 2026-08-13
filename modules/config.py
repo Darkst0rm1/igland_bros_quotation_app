@@ -214,6 +214,31 @@ class Settings(BaseSettings):
     # Derived / validated
     # ------------------------------------------------------------------ #
 
+    @field_validator("database_url")
+    @classmethod
+    def _use_the_installed_driver(cls, value: str) -> str:
+        """Point a bare PostgreSQL URL at psycopg 3, which is what is installed.
+
+        Every provider — Neon, Supabase, Render, AWS — hands out a connection
+        string beginning ``postgresql://``. SQLAlchemy reads that as "use
+        psycopg2", which this project does not ship: ``requirements.txt`` pins
+        ``psycopg[binary]``, version 3.
+
+        The result is a ``ModuleNotFoundError: No module named 'psycopg2'`` at
+        the moment of connecting — during a deploy's migration step, with a
+        traceback that says nothing about the URL being the cause. Which driver
+        the application uses is its own business, not something an operator
+        should have to know to paste a connection string correctly.
+
+        ``postgres://`` is handled too: it is the older form and several
+        providers still emit it.
+        """
+        url = (value or "").strip()
+        for prefix in ("postgresql://", "postgres://"):
+            if url.startswith(prefix):
+                return "postgresql+psycopg://" + url[len(prefix):]
+        return url
+
     @field_validator("allowed_upload_extensions")
     @classmethod
     def _normalise_extensions(cls, value: str) -> str:
@@ -245,13 +270,23 @@ class Settings(BaseSettings):
                 "STORAGE_BACKEND must be 's3' in production — uploaded price lists and "
                 "generated PDFs are durable records and cannot live on an ephemeral disk"
             )
-        if self.storage_backend == "s3" and not (
-            self.storage_bucket and self.storage_access_key_id and self.storage_secret_access_key
-        ):
-            problems.append(
-                "STORAGE_BUCKET, STORAGE_ACCESS_KEY_ID and STORAGE_SECRET_ACCESS_KEY are "
-                "required when STORAGE_BACKEND=s3"
-            )
+        if self.storage_backend == "s3":
+            # Named individually rather than as a group. The combined message
+            # sent an operator hunting for STORAGE_BUCKET when it was already
+            # set and only the two keys were missing.
+            absent = [
+                name for name, value in (
+                    ("STORAGE_BUCKET", self.storage_bucket),
+                    ("STORAGE_ACCESS_KEY_ID", self.storage_access_key_id),
+                    ("STORAGE_SECRET_ACCESS_KEY", self.storage_secret_access_key),
+                ) if not value
+            ]
+            if absent:
+                problems.append(
+                    f"{', '.join(absent)} "
+                    f"{'is' if len(absent) == 1 else 'are'} required when "
+                    "STORAGE_BACKEND=s3"
+                )
 
         problems += self._email_problems()
 

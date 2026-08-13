@@ -805,3 +805,50 @@ def _settings(**overrides):  # noqa: ANN202
     )
     base.update(overrides)
     return Settings(**base)
+
+
+class TestDatabaseUrlDriver:
+    """Providers hand out `postgresql://`; this project ships psycopg 3.
+
+    Left alone, that mismatch surfaces as ModuleNotFoundError: psycopg2 during
+    a deploy's migration step, with a traceback that never mentions the URL.
+    """
+
+    def _url(self, value: str) -> str:
+        from modules.config import Settings
+
+        return Settings(database_url=value, app_env="development").database_url
+
+    @pytest.mark.parametrize(
+        "given",
+        [
+            "postgresql://user:pass@host:5432/db",
+            "postgresql://user:pass@host/db?sslmode=require",
+            "postgres://user:pass@host/db",
+        ],
+    )
+    def test_a_bare_postgres_url_is_pointed_at_the_installed_driver(self, given):
+        assert self._url(given).startswith("postgresql+psycopg://")
+
+    def test_the_rest_of_the_url_is_untouched(self):
+        result = self._url("postgresql://user:pass@host:5432/db?sslmode=require")
+        assert result.endswith("user:pass@host:5432/db?sslmode=require")
+
+    def test_an_explicit_driver_is_left_alone(self):
+        given = "postgresql+psycopg://user:pass@host/db"
+        assert self._url(given) == given
+
+    def test_sqlite_is_left_alone(self):
+        assert self._url("sqlite:///./soneet.db") == "sqlite:///./soneet.db"
+
+    def test_sqlalchemy_resolves_it_to_psycopg_3(self):
+        from sqlalchemy.engine import make_url
+
+        url = make_url(self._url("postgresql://user:pass@host/db"))
+        assert url.drivername == "postgresql+psycopg"
+
+    def test_psycopg2_is_not_a_dependency(self):
+        """So the default driver could never have worked."""
+        requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+        assert "psycopg2" not in requirements
+        assert "psycopg[binary]" in requirements
