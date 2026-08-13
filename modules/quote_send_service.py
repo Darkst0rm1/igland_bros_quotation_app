@@ -1086,12 +1086,57 @@ class WorkerHealth:
         return "The delivery worker is running normally."
 
 
-def worker_health(stale_after_seconds: int | None = None) -> WorkerHealth:
-    """Read the worker's health signal, if one is configured.
+def worker_health(
+    session=None, stale_after_seconds: int | None = None  # noqa: ANN001
+) -> WorkerHealth:
+    """Whether the thing that actually delivers messages is running.
 
-    Reads the file the worker touches after every sweep rather than asking the
-    worker anything: it has no web surface, and giving it one so a page could
-    poll it would be a lot of machinery for a timestamp.
+    Reads the **database** heartbeat, because in production nothing shares a
+    filesystem: the employee app is on Streamlit Community Cloud, the portal
+    and the worker are separate Render services. A file the app cannot see
+    would report "Not configured" forever while delivery ran perfectly.
+
+    Falls back to the file signal when no database row exists and a health file
+    is configured — that is the local-development case, where one machine
+    genuinely does run everything.
+
+    ``session`` is optional so a caller inside a transaction can reuse it
+    rather than opening a second connection per page render.
+    """
+    from modules import worker_heartbeat
+
+    threshold = stale_after_seconds or _stale_threshold()
+
+    try:
+        if session is not None:
+            view = worker_heartbeat.read(
+                session, stale_after_seconds=threshold
+            )
+        else:
+            from modules.database import session_scope
+
+            with session_scope() as own:
+                view = worker_heartbeat.read(own, stale_after_seconds=threshold)
+    except Exception:  # noqa: BLE001 — an unreadable signal is an unknown one
+        return WorkerHealth(is_configured=False)
+
+    if view.is_configured:
+        return WorkerHealth(
+            is_configured=True,
+            is_healthy=view.is_healthy,
+            last_sweep_at=view.last_success_at,
+            degraded=view.degraded,
+        )
+
+    return _file_health(threshold)
+
+
+def _file_health(threshold: int) -> WorkerHealth:
+    """The original file signal. Local development only.
+
+    Kept because it needs no database round trip and works before migrations
+    have run, which is exactly the situation somebody is in while setting the
+    application up on their own machine.
     """
     from modules.worker import HEALTH_FILE_ENV
 
@@ -1099,17 +1144,15 @@ def worker_health(stale_after_seconds: int | None = None) -> WorkerHealth:
     if not path:
         return WorkerHealth(is_configured=False)
 
-    threshold = stale_after_seconds or _stale_threshold()
     try:
         from pathlib import Path
 
         target = Path(path)
         if not target.is_file():
             return WorkerHealth(is_configured=True, is_healthy=False)
-
         content = target.read_text(encoding="utf-8").strip()
         stamp = dt.datetime.fromtimestamp(target.stat().st_mtime, tz=dt.UTC)
-    except Exception:  # noqa: BLE001 — an unreadable signal is an unknown one
+    except Exception:  # noqa: BLE001
         return WorkerHealth(is_configured=True, is_healthy=False)
 
     age = (dt.datetime.now(dt.UTC) - stamp).total_seconds()

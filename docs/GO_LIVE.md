@@ -14,9 +14,9 @@ document until they are.
 
 | # | Blocker | Why it blocks |
 |---|---|---|
-| 1 | **A host for the worker** | Nothing is delivered without it. Streamlit Community Cloud sleeps when idle and cannot run it. See §5. |
+| 1 | **A Render account with a paid plan** | The worker has no free tier and a free web service sleeps for 15 minutes. See §4. |
 | 2 | **SMTP credentials** | With `EMAIL_ENABLED=false` the outbox fills and waits; nothing reaches a customer. |
-| 3 | **A domain for the portal** | `PORTAL_BASE_URL` must be an HTTPS origin you control. The link in every invitation points at it, and production refuses to start without it. |
+| 3 | **The portal's public URL** | `PORTAL_BASE_URL` must be the exact HTTPS origin Render assigns. Every invitation points at it, and production refuses to start without it. See §4. |
 | 4 | **Company information** | Legal name, trading name, address, phone and email. The readiness check blocks link issuing in production until these are set, and they appear on every customer page, email and PDF. |
 | 5 | **A company logo** | Not strictly blocking, but its absence is visible: the customer page and PDF show the brand name as plain text. |
 | 6 | **Tax settings** | At least one active tax rate, and the correct rate on each quotation. A quotation sent with the wrong rate is a wrong price to a customer. |
@@ -91,7 +91,7 @@ python -c "from modules.secret_box import generate_key; print(generate_key())"
 | `WORKER_BATCH_SIZE` | Rows per subsystem per sweep. Default 20. |
 | `WORKER_LEASE_SECONDS` | How long a worker's claim on a row is honoured. Default 300. |
 | `WORKER_STALE_AFTER_SECONDS` | When employees are told the worker looks stale. Default 900. |
-| `WORKER_HEALTH_FILE` | Path the worker touches after each sweep. Powers the indicator in the app and any external liveness check. |
+| `WORKER_HEALTH_FILE` | **Local development only.** Production uses the database heartbeat, which is the only signal three separate machines can share. Leave unset on Render. |
 
 ---
 
@@ -141,127 +141,207 @@ python -m modules.worker --once
 
 ---
 
-## 4. Hosting the customer portal
+## 4. Hosting on Render
 
-The portal is a separate FastAPI service sharing the same database. It must be
-publicly reachable; the employee application must not be.
+Two services, one Blueprint (`render.yaml` at the repository root), both from
+this repository:
 
-```bash
-uvicorn portal.app:app --host 0.0.0.0 --port 8000 --proxy-headers
+| Service | Type | Plan | Public | Runs |
+|---|---|---|---|---|
+| `soneet-portal` | Web service | Starter | Yes, HTTPS | `uvicorn portal.app:app --host 0.0.0.0 --port $PORT --proxy-headers` |
+| `soneet-worker` | Background worker | Starter | No | `python -m modules.worker --loop` |
+
+The private employee application stays on Streamlit Community Cloud. Only these
+two move — the portal because it must be reachable, the worker because it must
+run continuously.
+
+**Neither is on the free plan, deliberately.** A free web service sleeps after
+15 minutes without traffic and takes about a minute to wake; a customer opening
+a quotation link would sit on a loading page before seeing a document asking
+them to commit money. Render has no free tier for background workers at all, so
+Starter is the floor. Check the current rate on Render's pricing page — the
+plans and specifications are in their compute-plans documentation.
+
+### Creating them
+
+1. **Render Dashboard → New → Blueprint**, point it at this repository.
+2. Render reads `render.yaml` and proposes both services plus the
+   `soneet-shared` environment group.
+3. It prompts for every `sync: false` value — this is the only time it asks, so
+   have the rotated credentials ready. Anything you skip can be added later
+   under **Environment → soneet-shared**.
+4. Approve. The portal builds, runs `alembic upgrade head` as its pre-deploy
+   step, then starts.
+
+### Why the portal owns migrations
+
+`preDeployCommand: alembic upgrade head` is on the portal **only**. Two services
+running Alembic concurrently would race for the same lock, and the loser's
+deploy fails for a reason that looks like a database fault.
+
+Render runs a pre-deploy after the build and before the start command. A failed
+migration fails the deploy, and the previous version keeps serving — so a broken
+migration cannot leave a half-migrated schema with new code on top of it.
+
+The worker never migrates. That is what stops it consuming jobs against a schema
+it does not understand: if the portal's migration has not run, the worker's own
+code is simply older or newer, and the key-agreement and startup checks catch
+the mismatch.
+
+**Rollback.** Alembic downgrades exist for every migration in this project, but
+the safe rollback for a *deployment* is Render's own: roll the service back to
+the previous deploy, which leaves the schema forward-compatible because every
+portal migration is additive. Take a `pg_dump` before the first production
+migration regardless — §6 step 6.
+
+### The portal URL
+
+`PORTAL_BASE_URL` is what every customer's link points at. Production refuses to
+start without an HTTPS value, and it cannot be known before the service exists.
+
+1. Create the services and let the first deploy finish.
+2. Copy the assigned address from the portal service's page — it looks like
+   `https://soneet-portal.onrender.com`.
+3. Set `PORTAL_BASE_URL` to **exactly** that origin: `https`, no trailing slash,
+   no path. The approval origin check compares against it, so a mismatch makes
+   every customer approval fail with a 403.
+4. Redeploy both services so the worker picks it up too.
+
+Do not start the portal with a blank or guessed value, and do not paste the
+Cloudflare R2 endpoint here — they are handed to you at the same time and are
+easy to confuse. The preflight refuses both.
+
+**Moving to a custom domain later** means adding the domain in Render, then
+updating `PORTAL_BASE_URL` in the shared group and redeploying. Links already
+issued keep working — they are absolute URLs baked into emails already sent —
+but every *new* link uses the new origin, and the origin check follows the
+setting. Change it during a quiet period.
+
+### Object storage
+
+The R2 bucket stays **private**. The application never derives a public object
+URL: price lists, logos and quotation PDFs are served through routes that check
+a permission or validate a capability token first, and the accepted-quotation
+PDF is fetched, hash-verified and streamed by the portal.
+
+You therefore do **not** need R2's public development URL, a custom R2 domain,
+or any CORS policy. Leave all three off — enabling them would route around every
+access check the application makes.
+
+```
+STORAGE_BACKEND=s3
+STORAGE_BUCKET=soneet-quotations
+STORAGE_ENDPOINT_URL=https://ACCOUNT_ID.r2.cloudflarestorage.com
+STORAGE_REGION=auto
+STORAGE_ACCESS_KEY_ID=[rotated R2 S3 key]
+STORAGE_SECRET_ACCESS_KEY=[rotated R2 S3 secret]
 ```
 
-Requirements:
+### Python version
 
-* **HTTPS, terminated in front of it.** The link *is* the credential; it must
-  never travel in clear text. `PORTAL_BASE_URL` must match the public origin
-  exactly, because the origin check for approvals compares against it.
-* **`--proxy-headers`** when behind a reverse proxy, so client addresses are
-  read correctly for rate limiting.
-* **The same `SECRET_KEY`, `DATABASE_URL` and storage settings** as the
-  employee app. Line references and submission nonces are derived from
-  `SECRET_KEY`; a different value invalidates every issued link.
-* `/health` returns `{"status":"ok"}` and nothing else. Point the load balancer
-  at it.
-
-Nginx, as an example:
-
-```nginx
-location / {
-    proxy_pass http://127.0.0.1:8000;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-}
-```
-
-Do not add caching in front of it. Every response already sets `no-store`, and a
-cached quotation page would serve one customer's figures to the next visitor.
+Pinned to 3.13 in `.python-version`. Render's current default is newer, but
+`requirements.txt` is verified against cp313 wheels and that is what Community
+Cloud runs — matching the two removes a class of "works on the employee app,
+fails on the portal" surprise. Local development on 3.14 is unaffected.
 
 ---
 
-## 5. Hosting the worker
+## 5. The worker and its heartbeat
 
-Three queues need sweeping without anybody pressing a button: storage cleanups,
-accepted-PDF jobs, and the email outbox.
+`python -m modules.worker --loop` sweeps three queues: storage cleanups,
+accepted-PDF jobs and the email outbox. Each is swept in isolation, so an
+unreachable mail server does not stop PDFs being produced.
 
-**It cannot run on Streamlit Community Cloud.** That container sleeps when idle,
-which is the one thing a timer cannot tolerate. Put it on the host that runs the
-portal, on a small always-on machine, or on any scheduler that can invoke it.
+Exit codes matter here because Render restarts an exited worker:
 
-### As a service (preferred)
+| Code | Meaning |
+|---|---|
+| 0 | Clean shutdown (SIGTERM — it finishes the sweep it is in) |
+| 1 | A subsystem failed; the others still ran |
+| 2 | **Encryption keys disagree with the rest of the deployment.** It refuses to start, which shows up as a crash-looping service rather than silently undelivered mail |
 
-`/etc/systemd/system/soneet-worker.service`:
+### How the employee app knows the worker is alive
 
-```ini
-[Unit]
-Description=Soneet quotation worker
-After=network-online.target
+Through the **database**, not a file. The employee app, the portal and the
+worker are on three different machines with no shared filesystem, so the
+original `WORKER_HEALTH_FILE` signal is invisible to the page that needs it —
+it would report "Not configured" forever while delivery ran perfectly, or look
+healthy while the worker was dead.
 
-[Service]
-Type=simple
-User=soneet
-WorkingDirectory=/opt/soneet
-EnvironmentFile=/etc/soneet/worker.env
-ExecStart=/opt/soneet/.venv/bin/python -m modules.worker --loop
-Restart=always
-RestartSec=30
+The worker writes a row to `worker_heartbeats` after every sweep. The employee
+app reads it. Staleness is measured against the last *successful* sweep, so a
+worker looping on errors reads as stale rather than healthy, which is the
+honest answer because nothing is being delivered.
 
-[Install]
-WantedBy=multi-user.target
-```
+| State | Meaning |
+|---|---|
+| **Running** | A clean sweep within `WORKER_STALE_AFTER_SECONDS` (900 by default) |
+| **Degraded** | Running, but the last pass reported a subsystem failure |
+| **Not running recently** | Last success is older than the threshold |
+| **Not configured** | The worker has never reported against this database |
 
-```bash
-systemctl enable --now soneet-worker
-journalctl -u soneet-worker -f
-```
+The row holds status, timestamps, a counts summary and the environment name.
+No host, no path, no process identity, no error text — it is rendered on a page
+a salesperson looks at.
 
-`Restart=always` matters: the worker exits **2** on a key mismatch, and you want
-that visible in the logs rather than silently gone.
-
-### From a scheduler
-
-```
-*/2 * * * * cd /opt/soneet && .venv/bin/python -m modules.worker --once
-```
-
-Exit status: `0` clean, `1` a subsystem failed (the others still ran), `2` the
-key check refused to start. Alert on non-zero.
-
-### Liveness
-
-Set `WORKER_HEALTH_FILE` and check the file's modification time. It contains a
-timestamp, a status word and counts — no recipients, no identifiers, nothing
-that should not be read by monitoring.
-
-```bash
-find /var/run/soneet/worker-health -mmin -5 | grep -q . || echo "worker is stale"
-```
-
-Employees see the same signal in the application: **Running**, **Degraded**,
-**Not running recently** or **Not configured**. They can still queue a message
-while it is stale — the queue is durable — but they are told delivery may be
-delayed.
+`WORKER_HEALTH_FILE` still works and is still read as a fallback when no
+database row exists. That is the local-development case, where one machine runs
+everything. Do not set it on Render.
 
 ---
 
-## 6. Order of operations for the first deployment
+## 6. The initial deployment sequence
 
-1. Provision the database and object storage; set the shared variables from §2.
-2. `alembic upgrade head`, then `python -m seeds.bootstrap`.
-3. Deploy the employee application. Confirm it starts.
-4. Enter company details, upload the logo, configure tax. Work through the
-   readiness panel on the Customer Portal page until nothing is marked ⛔.
-5. Deploy the portal behind HTTPS. Confirm `/health`.
-6. Set `EMAIL_PAYLOAD_KEYS` **identically** on every host. Leave
-   `EMAIL_ENABLED=false` for now.
-7. Start the worker. Confirm "Email key agreement OK" in its log.
-8. Send one quotation to an address you control. It queues; the worker delivers
-   it; check the link opens and the figures are right.
-9. Set `EMAIL_ENABLED=true` and send a real one.
+Follow this order. Each step is cheap to undo; the ones that are not come last.
 
-Step 8 before step 9 is the point: with delivery off, a test send queues and
-waits, and you can inspect the outbox row and the rendered message without a
-customer receiving anything.
+1. **Rotate the exposed credentials.** The Neon role password and the
+   Cloudflare R2 S3 key used during testing were exposed and must be treated as
+   compromised. Reset the Neon password; delete and recreate the R2 API token.
+   Do not reuse either anywhere.
+2. **Create the Render project**, connected to this repository.
+3. **Add the rotated secrets manually** in Render, in the `soneet-shared`
+   environment group. Never in `render.yaml`, never in a file in the repository.
+4. **Create both services from the Blueprint** (New → Blueprint).
+5. **Confirm `EMAIL_ENABLED=false`.** Messages will queue and wait; nothing is
+   lost, and nothing reaches a customer while you are still checking.
+6. **Take a database backup, then run migrations once.** The portal's
+   pre-deploy does this automatically on first deploy; to run it by hand:
+   `pg_dump --format=custom --no-owner --file=pre-render.dump "$DATABASE_URL"`
+   then `alembic upgrade head`.
+7. **Run the preflight** from a Render shell on the portal service, or locally
+   against production:
+   `python -m scripts.preflight`
+   It checks variables, the HTTPS origin, database reachability, migration head,
+   the heartbeat table, an R2 write/read/delete round trip, encryption-key
+   agreement, SMTP configuration shape and company readiness. It redacts
+   everything and **sends no email**.
+8. **Start the portal and worker.**
+9. **Confirm `/health`** returns `{"status":"ok"}` on the portal's public URL.
+10. **Confirm the worker heartbeat** shows **Running** on the Customer Portal
+    page in the employee application. This proves both machines are talking to
+    the same database.
+11. **Upload a logo** in Company Settings and confirm it persists — that is the
+    private R2 round trip, through the real application.
+12. **Create a synthetic quotation** for a test customer.
+13. **Preview and queue a test invitation** while email is still disabled.
+    Preview creates no token and no outbox row; sending queues one.
+14. **Inspect the outbox** in Delivery history: status Queued, correct
+    recipient, correct revision.
+15. **Configure SMTP** in the shared environment group.
+16. **Send one test message to your own address** — set
+    `EMAIL_INTERNAL_RECIPIENTS` to yourself first, and use a quotation for a
+    test customer whose contact address is also yours.
+17. **Confirm the whole loop**: the link opens, the figures are right, approval
+    records, the confirmation and internal notice arrive, and the accepted PDF
+    downloads and verifies.
+18. **Complete company identity, logo and tax configuration** until the
+    readiness panel shows nothing marked ⛔.
+19. **Set the real internal notification recipients.**
+20. **Set `EMAIL_ENABLED=true`** — only after every check above has passed.
+
+Steps 13 and 14 before step 15 are the point: with delivery off you can inspect
+exactly what would be sent, to whom, with no possibility of a customer
+receiving it.
 
 ---
 

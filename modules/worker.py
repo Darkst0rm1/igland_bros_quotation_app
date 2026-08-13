@@ -180,8 +180,35 @@ def run_sweep(*, batch_size: int | None = None, owner: str | None = None) -> Swe
 
     result.finished_at = dt.datetime.now(dt.UTC)
     log.info("sweep complete: %s", result.summary())
+    _record_heartbeat(result)
     _write_health(result)
     return result
+
+
+def _record_heartbeat(result: SweepResult) -> None:
+    """Publish the sweep to the shared database.
+
+    This is what the employee application actually reads. The file below is
+    kept for local development, where one machine runs everything; in
+    production the app, the portal and the worker share a database and nothing
+    else, so a file-based signal would be invisible to the page that needs it.
+
+    Failures here are logged and swallowed: a heartbeat that cannot be written
+    is a monitoring problem, and refusing to sweep because of it would turn a
+    cosmetic fault into an outage.
+    """
+    from modules.database import session_scope
+    from modules.worker_heartbeat import record_sweep
+
+    try:
+        with session_scope() as session:
+            record_sweep(
+                session,
+                healthy=result.healthy,
+                summary=result.summary(),
+            )
+    except Exception:  # noqa: BLE001
+        log.warning("Could not record the worker heartbeat; the sweep still ran")
 
 
 def _set(result: SweepResult, field_name: str, value: int) -> int:

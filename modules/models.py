@@ -1470,6 +1470,69 @@ class EmailOutbox(Base):
         return bool(self.secure_payload)
 
 
+class WorkerHeartbeat(Base):
+    """Proof that the background worker is alive, visible from anywhere.
+
+    The original signal was a file the worker touched, which works when one
+    machine runs everything. In production nothing shares a filesystem: the
+    employee app is on Streamlit Community Cloud, the portal and the worker are
+    separate Render services. A file the employee app cannot see is not a
+    signal — the page would report "Not configured" forever while delivery ran
+    perfectly, or worse, look fine while the worker was dead.
+
+    The database is the one thing all three already share, so the heartbeat
+    lives here.
+
+    **Operational facts only.** No host name, no filesystem path, no worker
+    process identity, no exception text. An employee needs to know whether
+    delivery is moving; none of that tells them, and all of it would end up on
+    a screen or in a support ticket.
+    """
+
+    __tablename__ = "worker_heartbeats"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    #: One row per logical worker. Unique, so a restarted or replaced instance
+    #: updates the same record rather than accumulating a row per process —
+    #: "is the worker running" is a question about the role, not the container.
+    service_name: Mapped[str] = mapped_column(
+        String(60), nullable=False, unique=True
+    )
+    #: HEALTHY when the last sweep finished cleanly, DEGRADED when a subsystem
+    #: failed. Never carries *which* internal error occurred.
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="HEALTHY")
+
+    #: The last sweep that completed without a subsystem failing. This is what
+    #: staleness is measured against: a worker looping on errors is not healthy
+    #: merely because it is running.
+    last_success_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    #: The last sweep attempted, successful or not. The gap between the two is
+    #: how long something has been failing.
+    last_attempt_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+    #: Counts only, e.g. "storage=0 documents=1 emails=2". Safe to display.
+    summary: Mapped[str | None] = mapped_column(String(200))
+    #: Which deployment this is, for telling staging from production when both
+    #: point at one database by mistake. Not a host name.
+    environment: Mapped[str | None] = mapped_column(String(40))
+
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        default=lambda: dt.datetime.now(dt.UTC),
+        onupdate=lambda: dt.datetime.now(dt.UTC),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return (
+            f"<WorkerHeartbeat {self.service_name} {self.status} "
+            f"at={self.last_success_at}>"
+        )
+
+
 class StorageCleanup(Base):
     """An object that should be deleted, once the database says it is safe to.
 

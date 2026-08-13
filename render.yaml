@@ -1,0 +1,195 @@
+# Render Blueprint — the customer portal and the background worker.
+#
+# The private employee application stays on Streamlit Community Cloud. Only the
+# two services that must be reachable or must run continuously live here:
+#
+#   soneet-portal   public HTTPS, serves customers holding a quotation link
+#   soneet-worker   no public route, sweeps storage, PDF jobs and the outbox
+#
+# Both run from this repository and share one environment group, because they
+# must agree on the database, the object store and — critically — the email
+# encryption keys. A worker holding different key material from the portal
+# delivers nothing while looking perfectly healthy, so both processes compare a
+# fingerprint of their key at startup and refuse rather than fail quietly.
+#
+# NO SECRETS IN THIS FILE. Every credential is declared `sync: false`, which
+# makes Render prompt for it once at Blueprint creation and store it in the
+# dashboard. A value here would be a value in git.
+#
+# See docs/GO_LIVE.md for the deployment order and the dashboard steps.
+
+envVarGroups:
+  # One group, both services. Shared rather than duplicated so the two cannot
+  # drift: the failure mode of divergent configuration here is silent —
+  # different keys deliver nothing, a different database splits the queue.
+  - name: soneet-shared
+    envVars:
+      # --- environment ---------------------------------------------------
+      - key: APP_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: TZ
+        value: America/Toronto
+
+      # --- database --------------------------------------------------------
+      # Neon. Use the DIRECT endpoint (no -pooler) if you ever run migrations
+      # through a service; pooled connections are a poor fit for DDL.
+      - key: DATABASE_URL
+        sync: false
+
+      # --- application secret ---------------------------------------------
+      # Signs portal submission nonces and derives the opaque line references
+      # customers submit. Changing it invalidates every issued link.
+      - key: SECRET_KEY
+        sync: false
+
+      # --- object storage (Cloudflare R2) ---------------------------------
+      # The bucket stays private. The application never derives a public object
+      # URL: price lists, logos and quotation PDFs are all served through routes
+      # that check a permission or validate a capability token first.
+      - key: STORAGE_BACKEND
+        value: s3
+      - key: STORAGE_BUCKET
+        value: soneet-quotations
+      - key: STORAGE_REGION
+        value: auto
+      - key: STORAGE_ENDPOINT_URL
+        sync: false
+      - key: STORAGE_ACCESS_KEY_ID
+        sync: false
+      - key: STORAGE_SECRET_ACCESS_KEY
+        sync: false
+
+      # --- the customer portal ---------------------------------------------
+      # PORTAL_BASE_URL is the public origin of the portal service. It cannot be
+      # filled in before the service exists, and production refuses to start
+      # without an https value — deliberately, because it is what every
+      # customer's link points at. Set it in the dashboard after the first
+      # deploy, then redeploy. See docs/GO_LIVE.md.
+      - key: PORTAL_BASE_URL
+        sync: false
+      - key: PORTAL_SUPPORT_EMAIL
+        sync: false
+      - key: PORTAL_LINK_DAYS
+        value: "30"
+
+      # --- email delivery ---------------------------------------------------
+      # Off to begin with. Messages still queue — the outbox row is the business
+      # record — and are delivered whenever this is switched on. Nothing is lost
+      # in the meantime, which is what makes a cautious first deployment cheap.
+      - key: EMAIL_ENABLED
+        value: "false"
+      - key: EMAIL_BACKEND
+        value: smtp
+      - key: EMAIL_FROM_ADDRESS
+        sync: false
+      - key: EMAIL_FROM_NAME
+        sync: false
+      - key: EMAIL_REPLY_TO
+        sync: false
+      - key: EMAIL_INTERNAL_RECIPIENTS
+        sync: false
+
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USERNAME
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      # starttls (587) or tls (465). There is no unencrypted mode: the session
+      # carries both the credentials and the customer's quotation link.
+      - key: SMTP_SECURITY
+        value: starttls
+      - key: SMTP_TIMEOUT_SECONDS
+        value: "20"
+      - key: EMAIL_MAX_ATTEMPTS
+        value: "6"
+
+      # --- invitation link encryption --------------------------------------
+      # The portal stores only token hashes. An invitation waiting in the outbox
+      # has to carry the real link, so it is sealed with AES-256-GCM under a key
+      # held only here. IDENTICAL ON BOTH SERVICES — the app seals, the worker
+      # opens.
+      - key: EMAIL_PAYLOAD_KEYS
+        sync: false
+      - key: EMAIL_PAYLOAD_KEY_VERSION
+        value: v1
+      - key: EMAIL_PAYLOAD_TTL_HOURS
+        value: "72"
+
+      # --- background worker -------------------------------------------------
+      - key: WORKER_POLL_SECONDS
+        value: "30"
+      - key: WORKER_BATCH_SIZE
+        value: "20"
+      - key: WORKER_LEASE_SECONDS
+        value: "300"
+      # Wider than the poll interval on purpose: a worker that misses one sweep
+      # has not stopped, and an indicator that cries wolf gets ignored.
+      - key: WORKER_STALE_AFTER_SECONDS
+        value: "900"
+
+services:
+  # ------------------------------------------------------------------------ #
+  # The customer portal
+  # ------------------------------------------------------------------------ #
+  - type: web
+    name: soneet-portal
+    runtime: python
+    region: ohio
+    # Not `free`: a free web service sleeps after 15 minutes of no traffic and
+    # takes about a minute to wake. A customer opening a quotation link would
+    # sit on a loading page, which is the worst possible first impression of a
+    # document asking them to commit money.
+    plan: starter
+    branch: main
+    # Deploy on a pushed commit. Switch to `off` if you would rather promote
+    # deploys by hand once real customers depend on this.
+    autoDeployTrigger: commit
+    buildCommand: pip install -r requirements.txt
+    # $PORT is assigned by Render; binding 0.0.0.0 is required to be reachable.
+    # --proxy-headers so client addresses survive Render's load balancer, which
+    # the portal's rate limiting depends on.
+    startCommand: >-
+      uvicorn portal.app:app
+      --host 0.0.0.0
+      --port $PORT
+      --proxy-headers
+      --forwarded-allow-ips '*'
+    # Liveness only — returns {"status":"ok"} and leaks no configuration.
+    healthCheckPath: /health
+    # This service owns migrations. Exactly one does, so two deploys cannot race
+    # Alembic; a failed migration fails the deploy and the old version keeps
+    # serving. The worker never migrates, so it can never start against a schema
+    # it does not understand.
+    preDeployCommand: alembic upgrade head
+    envVars:
+      - fromGroup: soneet-shared
+
+  # ------------------------------------------------------------------------ #
+  # The background worker
+  # ------------------------------------------------------------------------ #
+  - type: worker
+    name: soneet-worker
+    runtime: python
+    region: ohio
+    # Background workers have no free tier; starter is the minimum, and this
+    # must run continuously — nothing is delivered without it.
+    plan: starter
+    branch: main
+    autoDeployTrigger: commit
+    buildCommand: pip install -r requirements.txt
+    # --loop, not --once: Render restarts a worker that exits, so a one-shot
+    # command would become a restart loop. The worker sleeps between sweeps and
+    # stops cleanly on SIGTERM, finishing the pass it is in rather than
+    # abandoning leased rows.
+    #
+    # Exits 2 if its encryption key disagrees with the portal's, which surfaces
+    # as a crash-looping service rather than silently undelivered mail.
+    startCommand: python -m modules.worker --loop
+    # Deliberately no preDeployCommand: the portal owns migrations.
+    envVars:
+      - fromGroup: soneet-shared
