@@ -579,6 +579,7 @@ with lines_tab:
                         "id": v.id,
                         "label": f"{v.board_quality} · case {v.case_pack}",
                         "case_pack": v.case_pack,
+                        "moq_packs": v.moq_packs,
                     }
                     for v in variants_for_product(db, product_id)
                 ]
@@ -639,24 +640,58 @@ with lines_tab:
                 )
 
             # Outside the form deliberately. A widget inside ``st.form`` does
-            # not rerun until the form is submitted, so the container count
-            # could never fill itself from a quantity that is still being
-            # typed. Out here each keystroke reruns the script, and the
-            # Containers input below is re-initialised from the result.
-            packs = st.number_input(
-                "Quantity (packs)", min_value=0.0, step=50.0, value=0.0,
+            # not rerun until the form is submitted, so nothing below could
+            # fill itself from a quantity that is still being typed. Out here
+            # each keystroke reruns the script.
+            #
+            # Entered in PIECES, because that is the unit the customer asks in.
+            # The quotation stores packs, so this divides by the variant's own
+            # case pack rather than a hard-coded 50 — case pack is part of a
+            # variant's identity and has differed between them before.
+            #
+            # Opens at the minimum order quantity, which is one container.
+            # Typing over it is the point: a mixed container is a normal thing
+            # to quote, and a quantity below the MOQ raises a pricing warning
+            # rather than being refused. ``value`` changes only when the picked
+            # variant does, so an edit survives every rerun until then.
+            case_pack = int(variant["case_pack"]) or 1
+            moq_packs = variant.get("moq_packs")
+            moq_pieces = float(moq_packs) * case_pack if moq_packs else 0.0
+
+            pieces = st.number_input(
+                "Quantity (pieces)", min_value=0.0, step=float(case_pack),
+                value=moq_pieces,
                 help=(
-                    "How many packs the customer is asking for. The container "
-                    "count below fills from this."
+                    "How many boxes the customer wants. Opens at the minimum "
+                    "order quantity — one full container. Change it freely; a "
+                    "smaller quantity is quoted with a warning, not refused."
                 ),
             )
+            packs = pieces / case_pack
+
             suggested_containers = 0.0
-            if bundle is not None and packs > 0:
-                per_container = float(bundle["per_container"] or 0)
-                if per_container > 0:
-                    # Two decimals: a part container is real and the customer's
-                    # tier depends on it, so it must not be rounded away.
-                    suggested_containers = round(packs / per_container, 2)
+            per_container = float(bundle["per_container"] or 0) if bundle else 0.0
+            if per_container > 0 and packs > 0:
+                # Two decimals: a part container is real and the customer's
+                # tier depends on it, so it must not be rounded away.
+                suggested_containers = round(packs / per_container, 2)
+
+            detail = [f"{format_quantity(Decimal(str(packs)))} packs of {case_pack}"]
+            if suggested_containers:
+                detail.append(f"{suggested_containers:g} container(s)")
+            if moq_pieces:
+                detail.append(f"MOQ {format_quantity(Decimal(str(moq_pieces)))} pieces")
+            st.caption(" · ".join(detail))
+
+            if pieces and pieces % case_pack:
+                # Not refused: a customer may genuinely ask for a part pack, and
+                # the line stores packs as a decimal. But it is worth saying,
+                # because the price is per pack and a part pack is unusual.
+                st.warning(
+                    f"{format_quantity(Decimal(str(pieces)))} pieces is not a "
+                    f"whole number of {case_pack}-piece packs.",
+                    icon="⚠️",
+                )
 
             with st.form("add_line"):
                 form_a, form_b, form_c = st.columns(3)
@@ -727,12 +762,16 @@ with lines_tab:
                 try:
                     if packs <= 0:
                         raise QuotationError("Enter a quantity greater than zero.")
+                    # Divided as Decimal, not float: 115,200 / 50 in binary
+                    # floating point is not reliably 2,304, and this figure is
+                    # multiplied by a price and printed for a customer.
+                    quantity_packs = Decimal(str(pieces)) / Decimal(case_pack)
                     with session_scope() as db:
                         quotation_service.add_line(
                             db, user, db.get(Quotation, quotation_id),
                             product_variant_id=variant["id"],
                             price_tier_code=tier_code,
-                            quantity_packs=Decimal(str(packs)),
+                            quantity_packs=quantity_packs,
                             container_count=Decimal(str(containers)),
                             pricing_basis=basis,
                             line_discount_pct=Decimal(str(discount)),
