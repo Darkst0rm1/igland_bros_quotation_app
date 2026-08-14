@@ -16,6 +16,7 @@ import datetime as dt
 from dataclasses import dataclass, field
 from decimal import Decimal
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from modules import settings_service
@@ -309,12 +310,57 @@ def _column_set(session: Session) -> list[str]:
     return valid or list(DEFAULT_COLUMNS)
 
 
-def _line_values(item, currency: str) -> dict[str, str]:  # noqa: ANN001
+def _derived_containers(session: Session, items) -> dict[int, str]:  # noqa: ANN001
+    """How many containers each line's quantity fills, where that is knowable.
+
+    Presentational only, and used solely as a fallback when nobody typed a
+    container count. It is deliberately **not** written back to
+    ``item.container_count``: ``pricing_service._quotation_container_total``
+    ranks a typed count above a catalogue estimate when deciding which
+    container tier a customer is quoted at, and promoting a workbook figure to
+    "somebody's own statement" could move a quotation between the three- and
+    eight-container rate. The workbook is also known to contain at least one
+    capacity that cannot be right.
+
+    Unlike everything else on the line this reads live catalogue capacity, so a
+    later workbook change can alter a *reprinted draft*. It cannot alter a
+    record: an accepted quotation is rendered once and stored as an immutable
+    artifact, and a draft is not a record of anything.
+
+    A line whose product has no capacity row simply gets no figure, rather than
+    a guess.
+    """
+    from modules.models import ProductContainerCapacity
+    from modules.pricing_service import containers_for_quantity
+    from modules.repositories import get_variant
+
+    derived: dict[int, str] = {}
+    for item in items:
+        if not item.product_variant_id or item.container_count:
+            continue
+        variant = get_variant(session, item.product_variant_id)
+        if variant is None:
+            continue
+        capacity = session.execute(
+            select(ProductContainerCapacity).where(
+                ProductContainerCapacity.product_id == variant.product_id
+            )
+        ).scalars().first()
+        share = containers_for_quantity(item.quantity_packs, capacity)
+        if share is not None:
+            derived[item.id] = format_quantity(share)
+    return derived
+
+
+def _line_values(  # noqa: ANN001
+    item, currency: str, derived_containers: str = "",
+) -> dict[str, str]:
     """Format one quotation line for display.
 
     Note what is read: only the snapshot fields on the line itself, never the
     live product or price. A catalogue change after issue cannot alter a
-    reprinted document.
+    reprinted document. ``derived_containers`` is the one exception and is
+    computed by the caller — see :func:`_derived_containers`.
     """
     description = item.description_override or item.size_label or ""
     spec = item.spec_text_override or compose_spec_text(
@@ -333,8 +379,13 @@ def _line_values(item, currency: str) -> dict[str, str]:  # noqa: ANN001
         "moq": format_quantity(item.moq_packs) if item.moq_packs else "",
         "quantity_packs": format_quantity(item.quantity_packs),
         "quantity_pieces": format_quantity(item.quantity_pieces),
+        # A count somebody typed is their statement of the shipment and wins.
+        # Otherwise show what the requested quantity fills, when the catalogue
+        # knows the capacity; blank when it does not, rather than a wrong number.
         "containers": (
-            format_quantity(item.container_count) if item.container_count else ""
+            format_quantity(item.container_count)
+            if item.container_count
+            else derived_containers
         ),
         "price_per_pack": format_money(item.price_per_pack, currency, decimals=4),
         "price_per_piece": format_money(item.price_per_piece, currency, decimals=4),
@@ -413,9 +464,15 @@ def build_document(
     )
 
     columns = _column_set(session)
+    ordered = sorted(quotation.items, key=lambda i: (i.sort_order, i.line_no))
+    derived = (
+        _derived_containers(session, ordered) if "containers" in columns else {}
+    )
     lines = [
-        DocumentLine(values=_line_values(item, currency))
-        for item in sorted(quotation.items, key=lambda i: (i.sort_order, i.line_no))
+        DocumentLine(
+            values=_line_values(item, currency, derived.get(item.id, ""))
+        )
+        for item in ordered
     ]
 
     totals: list[DocumentTotal] = [

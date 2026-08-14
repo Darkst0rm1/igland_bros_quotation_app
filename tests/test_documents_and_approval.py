@@ -157,6 +157,91 @@ class TestDocumentModel:
         assert values["quantity_packs"] == "1,000"
         assert values["line_total"] == "$7,420.00"
 
+    def test_containers_are_derived_from_the_quantity_when_none_was_typed(
+        self, session, quotation, variant
+    ):
+        """The customer is told what their quantity fills, not left guessing.
+
+        Nobody types a container count on most lines, so the column would
+        otherwise be permanently blank. The estimate is presentational: it is
+        never written back to ``container_count``, because
+        ``pricing_service._quotation_container_total`` trusts a typed count
+        above a catalogue estimate when choosing the container price tier.
+        """
+        from decimal import Decimal as D
+
+        from modules.constants import ContainerSize, ContainerType
+        from modules.models import ProductContainerCapacity, Product
+
+        line = quotation.items[0]
+        assert not line.container_count, "fixture should have none typed"
+
+        product = session.get(Product, variant.product_id)
+        product.units_per_bundle = D("10")           # 10 packs to a bundle
+        session.add(ProductContainerCapacity(
+            product_id=product.id,
+            container_size=ContainerSize.FORTY_FT_HC,
+            container_type=ContainerType.DRY,
+            bundles_per_container=D("20"),           # -> 200 packs per container
+        ))
+        session.flush()
+
+        values = document_model.build_document(session, quotation).lines[0].values
+        # 20 bundles x 10 pieces = 200 pieces per container, / 50 per pack
+        # = 4 packs per container; 1,000 packs / 4 = 250.
+        assert values["containers"] == "250"
+        assert not line.container_count, "the estimate must not be written back"
+
+    def test_a_typed_container_count_beats_the_estimate(
+        self, session, quotation, variant
+    ):
+        """Somebody's own statement of the shipment outranks the workbook."""
+        from decimal import Decimal as D
+
+        from modules.constants import ContainerSize, ContainerType
+        from modules.models import ProductContainerCapacity, Product
+
+        product = session.get(Product, variant.product_id)
+        product.units_per_bundle = D("10")
+        session.add(ProductContainerCapacity(
+            product_id=product.id,
+            container_size=ContainerSize.FORTY_FT_HC,
+            container_type=ContainerType.DRY,
+            bundles_per_container=D("20"),
+        ))
+        quotation.items[0].container_count = D("3")
+        session.flush()
+
+        values = document_model.build_document(session, quotation).lines[0].values
+        assert values["containers"] == "3"
+
+    def test_no_capacity_means_a_blank_cell_not_a_guess(
+        self, session, quotation
+    ):
+        """A partly-populated catalogue must not invent a figure."""
+        values = document_model.build_document(session, quotation).lines[0].values
+        assert values["containers"] == ""
+
+    def test_the_seed_does_not_pin_the_column_set(self):
+        """DEFAULT_COLUMNS must stay reachable in a seeded deployment.
+
+        The seed used to store a verbatim copy of DEFAULT_COLUMNS in
+        pdf_column_set. ``_column_set`` prefers a stored set, so every seeded
+        deployment was frozen to the columns as they stood on install day and
+        no later change to the default could reach it — the constant was dead
+        code and the containers column could never have appeared.
+
+        A stored set is meaningful only when a person chose it.
+        """
+        import inspect
+
+        from seeds import seed_reference_data
+
+        source = inspect.getsource(seed_reference_data)
+        assert "pdf_column_set=None" in source, (
+            "the seed must leave pdf_column_set unset so DEFAULT_COLUMNS applies"
+        )
+
     def test_quantities_are_never_rendered_in_scientific_notation(
         self, session, quotation
     ):

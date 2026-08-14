@@ -138,12 +138,15 @@ def seed_company_settings(session: Session) -> CompanySettings:
             "This quotation is confidential and intended solely for the named recipient."
         ),
         pdf_thank_you_text="Thank you for your enquiry.",
-        pdf_column_set={
-            "columns": [
-                "item", "description", "size", "pack_size",
-                "quantity_packs", "price_per_pack", "price_per_piece", "line_total",
-            ]
-        },
+        # Deliberately unset. It used to be seeded with a verbatim copy of
+        # document_model.DEFAULT_COLUMNS, which made that constant dead code:
+        # _column_set prefers a stored set, so every seeded deployment was
+        # pinned to the column list as it stood on the day it was installed and
+        # no later change to the default could ever reach it. Left as NULL, the
+        # default applies and stays live; an employee choosing columns in
+        # Company Settings still overrides it, which is the only time a stored
+        # set means anything.
+        pdf_column_set=None,
         pdf_show_acceptance_line=False,
         is_placeholder=True,
     )
