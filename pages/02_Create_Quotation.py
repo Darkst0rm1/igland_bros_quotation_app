@@ -638,6 +638,26 @@ with lines_tab:
                     f"{format_date(header['quote_date'])}."
                 )
 
+            # Outside the form deliberately. A widget inside ``st.form`` does
+            # not rerun until the form is submitted, so the container count
+            # could never fill itself from a quantity that is still being
+            # typed. Out here each keystroke reruns the script, and the
+            # Containers input below is re-initialised from the result.
+            packs = st.number_input(
+                "Quantity (packs)", min_value=0.0, step=50.0, value=0.0,
+                help=(
+                    "How many packs the customer is asking for. The container "
+                    "count below fills from this."
+                ),
+            )
+            suggested_containers = 0.0
+            if bundle is not None and packs > 0:
+                per_container = float(bundle["per_container"] or 0)
+                if per_container > 0:
+                    # Two decimals: a part container is real and the customer's
+                    # tier depends on it, so it must not be rounded away.
+                    suggested_containers = round(packs / per_container, 2)
+
             with st.form("add_line"):
                 form_a, form_b, form_c = st.columns(3)
                 with form_a:
@@ -662,12 +682,32 @@ with lines_tab:
                         ),
                     )
                 with form_b:
-                    packs = st.number_input(
-                        "Quantity (packs)", min_value=0.0, step=50.0, value=0.0
-                    )
+                    # No ``key``: the widget must re-initialise from ``value``
+                    # when the quantity above changes. With a key, session
+                    # state would win and the suggestion would go stale after
+                    # the first render. Typed edits survive until the quantity
+                    # moves again, which is the intended behaviour — the
+                    # employee's own figure is not overwritten while they work.
                     containers = st.number_input(
-                        "Containers", min_value=0.0, step=1.0, value=0.0
+                        "Containers", min_value=0.0, step=1.0,
+                        value=suggested_containers,
+                        help=(
+                            "Filled from the quantity and this size's container "
+                            "capacity. Type over it if the shipment differs — "
+                            "what you enter is treated as your own statement of "
+                            "the shipment and takes precedence everywhere."
+                        ),
                     )
+                    if suggested_containers:
+                        st.caption(
+                            f"{format_quantity(Decimal(str(packs)))} packs ÷ "
+                            f"{format_quantity(bundle['per_container'])} per container"
+                        )
+                    elif bundle is None:
+                        st.caption(
+                            "No container capacity recorded for this size, so "
+                            "this cannot be filled in automatically."
+                        )
                 with form_c:
                     discount = st.number_input(
                         "Line discount %", min_value=0.0, max_value=100.0, step=0.5, value=0.0
@@ -728,6 +768,11 @@ with lines_tab:
             new_containers = st.number_input(
                 "Containers", min_value=0.0, step=1.0,
                 value=float(edit_line["container_count"]), key="edit_containers",
+                help=(
+                    "Leave at zero and the document works it out from the "
+                    "quantity. A figure here is your own statement of the "
+                    "shipment and overrides that everywhere."
+                ),
             )
         with edit_b:
             new_discount = st.number_input(
