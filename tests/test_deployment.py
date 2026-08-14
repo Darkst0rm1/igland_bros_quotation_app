@@ -770,6 +770,51 @@ class TestPreflight:
         _check_migration_head(report)
         assert not report.failed
 
+    def test_no_active_tax_rate_fails_preflight(self, session):
+        """The gap this check exists to close.
+
+        ``portal_readiness`` evaluates tax against a quotation, so every
+        company-level check passed on a live deployment that had no tax rates
+        at all — preflight reported "safe to start" while the send path refused
+        every quotation.
+        """
+        from scripts.preflight import Report, check_tax_rates
+
+        report = Report()
+        check_tax_rates(report)
+        assert report.failed
+
+    def test_a_zero_percent_rate_satisfies_the_check(self, session):
+        """Zero is a real answer for an export sale — it just has to be chosen."""
+        from decimal import Decimal
+
+        from modules.models import TaxRate
+        from scripts.preflight import Report, check_tax_rates
+
+        session.add(
+            TaxRate(code="EXPORT", name="Export", rate_pct=Decimal("0"), is_active=True)
+        )
+        session.commit()
+
+        report = Report()
+        check_tax_rates(report)
+        assert not report.failed
+
+    def test_an_inactive_rate_does_not_count(self, session):
+        from decimal import Decimal
+
+        from modules.models import TaxRate
+        from scripts.preflight import Report, check_tax_rates
+
+        session.add(
+            TaxRate(code="OLD", name="Retired", rate_pct=Decimal("18"), is_active=False)
+        )
+        session.commit()
+
+        report = Report()
+        check_tax_rates(report)
+        assert report.failed
+
     def test_the_key_agreement_check_reports_the_version_not_the_key(
         self, session
     ):
