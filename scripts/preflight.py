@@ -389,14 +389,14 @@ def check_company_readiness(report: Report) -> None:
     outstanding = [r.label for r in readiness.outstanding]
     if readiness.is_complete:
         # Deliberately not the word "complete" on its own. ``check`` was called
-        # without a quotation, so it skipped the three requirements that are
-        # scoped to one — terms, expiry and tax. Saying "complete" here reads as
-        # "ready to send", and a deployment can pass this line while every
-        # send is refused.
+        # without a quotation, so it skipped the requirements scoped to one —
+        # terms and expiry. Saying "complete" here reads as "ready to send",
+        # and a deployment can pass this line while an individual quotation is
+        # still refused.
         report.ok(
             "Company readiness",
             "company details complete — each quotation is additionally "
-            "checked for terms, an expiry date and a tax rate when sent",
+            "checked for terms and an expiry date when sent",
         )
     elif readiness.may_issue_link:
         report.warn("Company readiness", f"outstanding: {', '.join(outstanding)}")
