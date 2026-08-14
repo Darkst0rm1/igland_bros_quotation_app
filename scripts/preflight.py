@@ -407,42 +407,6 @@ def check_company_readiness(report: Report) -> None:
         )
 
 
-def check_tax_rates(report: Report) -> None:
-    """Zero active tax rates means no quotation can ever be sent.
-
-    ``portal_readiness`` evaluates tax against a quotation's own currency, so a
-    deployment with no rates at all looks healthy to every company-level check
-    and then refuses the first send. A zero rate is a legitimate answer — an
-    export sale may genuinely carry none — but it has to exist as a deliberate
-    row rather than an empty field, which is exactly what that check enforces.
-    """
-    from sqlalchemy import select
-
-    from modules.database import session_scope
-    from modules.models import TaxRate
-
-    try:
-        with session_scope() as session:
-            rates = session.scalars(
-                select(TaxRate).where(TaxRate.is_active.is_(True))
-            ).all()
-            described = [f"{rate.name} at {rate.rate_pct}%" for rate in rates]
-    except Exception as exc:  # noqa: BLE001
-        report.warn("Tax rates", f"could not be checked: {type(exc).__name__}")
-        return
-
-    if not described:
-        report.fail(
-            "Tax rates",
-            "no active tax rate is configured, so no quotation can be sent. "
-            "Zero percent is a valid answer for an export sale, but it has to "
-            "be chosen rather than left empty.",
-        )
-        return
-
-    report.ok("Tax rates", f"{len(described)} active: {', '.join(described)}")
-
-
 # --------------------------------------------------------------------------- #
 # Running
 # --------------------------------------------------------------------------- #
@@ -462,7 +426,6 @@ def run() -> Report:
     check_key_agreement(report, settings)
     check_email(report, settings)
     check_company_readiness(report)
-    check_tax_rates(report)
     return report
 
 

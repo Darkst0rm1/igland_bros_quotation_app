@@ -3,8 +3,7 @@
 ``CompanySettings`` ships as flagged placeholders so the application is usable
 before anyone has typed the company's details in. That is fine for internal
 work and unacceptable the moment a document leaves the building: a customer
-must never receive a quotation headed by a placeholder, or one whose tax has
-been silently computed at zero.
+must never receive a quotation headed by a placeholder.
 
 This is a gate, not a warning. In production a link cannot be issued until the
 mandatory fields are filled. In development the same list is shown, previewing
@@ -19,7 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from modules.config import Settings, get_settings
-from modules.models import CompanySettings, Quotation, TaxRate
+from modules.models import CompanySettings, Quotation
 
 
 @dataclass(frozen=True)
@@ -144,39 +143,22 @@ def check(
                 "Without one the customer link falls back to a 30-day default.",
             )
         )
-        items.append(_tax_requirement(session, quotation))
+        # There is deliberately no tax requirement here, for the same reason
+        # ``quote_send_service`` has no "tax rate not set" gate: ``tax_rate_pct``
+        # is NOT NULL with a default of zero, so "never configured" is not a
+        # state this schema can represent, and a genuine zero rate is normal on
+        # an export sale.
+        #
+        # This check previously keyed off ``quotation.tax_rate_id``, and blocked
+        # every send in every deployment. Nothing assigns that column —
+        # ``TaxRate`` rows are never constructed anywhere in the application,
+        # and ``revision_service`` only copies the value forward — so the
+        # requirement could not be satisfied through any supported path. The
+        # gate was removed from ``quote_send_service`` for being unreachable and
+        # then survived here, reached through this very function.
+        #
+        # Tax reaches the customer through ``tax_rate_pct``, which the Create
+        # Quotation page sets and the calculation engine, document model,
+        # pricing snapshot and revisions all read.
 
     return Readiness(tuple(items), is_production=settings.is_production)
-
-
-def _tax_requirement(session: Session, quotation: Quotation) -> Requirement:
-    """Tax must be configured for the quotation's own currency.
-
-    A zero rate is legitimate — an export sale may genuinely carry none — but it
-    must be a decision, not an empty field. So the check is "a rate exists for
-    this currency", not "the rate is greater than zero".
-    """
-    if quotation.tax_rate_id is not None:
-        rate = session.get(TaxRate, quotation.tax_rate_id)
-        if rate is not None and rate.is_active:
-            return Requirement(
-                "tax", f"Tax configured for {quotation.currency}",
-                True, f"{rate.name} at {rate.rate_pct}%.",
-            )
-
-    available = session.execute(
-        select(TaxRate).where(TaxRate.is_active.is_(True))
-    ).scalars().all()
-    return Requirement(
-        "tax", f"Tax configured for {quotation.currency}",
-        satisfied=False,
-        detail=(
-            "No active tax rate is attached to this quotation. "
-            + (
-                f"{len(available)} rate(s) are configured — attach one, or set it "
-                "to zero deliberately."
-                if available
-                else "No tax rates are configured at all."
-            )
-        ),
-    )

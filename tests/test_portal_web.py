@@ -72,11 +72,20 @@ def client(session, monkeypatch):
     """A test client whose requests use the test's own session."""
     from contextlib import contextmanager
 
+    from modules.config import get_settings
     from portal import app as portal_app
 
     @contextmanager
     def _scope():
         yield session
+
+    # TestClient serves every request from http://testserver, and the origin
+    # check compares against PORTAL_BASE_URL. Pin it, because `modules.config`
+    # loads the developer's `.env`: with a real deployment URL sitting in that
+    # untracked file, same-origin submissions in these tests are judged
+    # cross-origin and rejected 403. The suite's result must not depend on
+    # whether somebody has filled in their local configuration.
+    monkeypatch.setattr(get_settings(), "portal_base_url", "http://testserver")
 
     monkeypatch.setattr(portal_app, "session_scope", _scope)
     portal_app._view_limiter.reset()

@@ -317,6 +317,52 @@ class TestEligibility:
         assert eligibility.may_send
         assert "no_tax" not in [b.code for b in eligibility.blockers]
 
+    def test_readiness_does_not_block_a_send_in_production(
+        self, session, sendable, admin, monkeypatch
+    ):
+        """The bug this exists to catch, and why the suite could not see it.
+
+        ``Readiness.may_issue_link`` short-circuits to True outside production,
+        so every readiness-derived blocker is invisible to a development test
+        run. ``portal_readiness`` carried a tax requirement keyed off
+        ``quotation.tax_rate_id`` — a column nothing in the application ever
+        assigns, with no UI, service or seed that creates a ``TaxRate`` row — so
+        it blocked every send in every production deployment while the whole
+        suite stayed green. The test above asserts ``may_send`` and passed
+        throughout, because in development the gate is not reached.
+
+        This is the only test that exercises ``check_eligibility`` as production
+        does. Deleting it restores the blind spot.
+        """
+        from sqlalchemy import select
+
+        from modules.config import get_settings
+        from modules.models import CompanySettings, TaxRate
+
+        company = session.execute(select(CompanySettings)).scalars().first()
+        company.legal_name = "Northwind Packaging Ltd"
+        company.trading_name = "Northwind"
+        company.address_line1 = "1 Mill Road"
+        company.city = "Istanbul"
+        company.country = "Türkiye"
+        company.phone = "+90 212 000 00 00"
+        company.email = "sales@northwind.invalid"
+        company.logo_key = "branding/logo.png"
+        company.is_placeholder = False
+        sendable.tax_rate_pct = D("0")
+        sendable.tax_rate_id = None
+        session.flush()
+
+        # The state every real deployment is in: no tax rates exist at all.
+        assert session.scalars(select(TaxRate)).all() == []
+        monkeypatch.setattr(get_settings(), "app_env", "production")
+
+        eligibility = sender.check_eligibility(
+            session, admin, sendable, recipient=GOOD_ADDRESS
+        )
+        assert "readiness" not in [b.code for b in eligibility.blockers]
+        assert eligibility.may_send
+
     def test_email_being_switched_off_is_refused(
         self, session, sendable, admin, monkeypatch
     ):
