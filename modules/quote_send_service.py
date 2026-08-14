@@ -616,6 +616,34 @@ def send(
                 "This quotation could not be issued, so it was not sent."
             ) from exc
 
+    # And say so in the status. ``issue`` locks the quotation and records the
+    # snapshot, but it deliberately does not touch ``status`` — it is also used
+    # where nothing has been sent. Without this the quotation stays APPROVED
+    # after the customer has the link, and ``portal_service.assert_respondable``
+    # refuses every approval and change request with "This quotation is not open
+    # for a response", because RESPONDABLE_STATUSES is exactly
+    # {SENT_TO_CUSTOMER}. The customer page renders, the POST returns 400, and
+    # no customer can ever accept anything.
+    #
+    # APPROVED -> SENT_TO_CUSTOMER was already legal in STATUS_TRANSITIONS and
+    # simply had no writer. change_status is the sole writer of the column and
+    # validates the move, so an unexpected starting state raises here rather
+    # than silently leaving the quotation unrespondable.
+    if quotation.status is not QuotationStatus.SENT_TO_CUSTOMER:
+        from modules import quotation_service
+
+        try:
+            quotation_service.change_status(
+                session, user, quotation,
+                QuotationStatus.SENT_TO_CUSTOMER,
+                note="Emailed to customer",
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise SendError(
+                "This quotation could not be marked as sent, so it was not "
+                "sent — a customer could not have responded to it."
+            ) from exc
+
     revoked: list[int] = []
     if revoke_existing:
         # A resend replaces the customer's way in. Revoking first means there is

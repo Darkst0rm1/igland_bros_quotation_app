@@ -374,6 +374,53 @@ def check_email(report: Report, settings) -> None:  # noqa: ANN001
     report.ok("Preflight sent no email", "by construction; this check is shape only")
 
 
+def check_branding_assets(report: Report) -> None:
+    """A recorded logo key is not a stored logo.
+
+    ``portal_readiness`` asks only whether ``company.logo_key`` holds text, so a
+    key written when the object store was misconfigured passes every readiness
+    check and then 404s on the customer page and in the accepted PDF, which
+    logs "Logo unavailable ... continuing without it" and carries on. The
+    company believes it has a logo; every customer sees the brand as text.
+
+    Fetching it here is cheap — preflight already does a storage round trip, and
+    this runs at deploy time rather than per page view.
+    """
+    from sqlalchemy import select
+
+    from modules.database import session_scope
+    from modules.models import CompanySettings
+    from modules.storage import get_storage
+
+    try:
+        with session_scope() as session:
+            company = session.execute(select(CompanySettings)).scalars().first()
+            key = (company.logo_key or "").strip() if company else ""
+    except Exception as exc:  # noqa: BLE001
+        report.warn("Company logo", f"could not be checked: {type(exc).__name__}")
+        return
+
+    if not key:
+        report.warn(
+            "Company logo",
+            "none set — the customer page shows the brand name as text",
+        )
+        return
+
+    try:
+        size = len(get_storage().get(key))
+    except Exception as exc:  # noqa: BLE001
+        report.fail(
+            "Company logo",
+            f"a logo is recorded but is not in storage ({type(exc).__name__}). "
+            f"Re-upload it in Company Settings; until then every customer sees "
+            f"the brand name as text.",
+        )
+        return
+
+    report.ok("Company logo", f"stored and readable ({size:,} bytes)")
+
+
 def check_company_readiness(report: Report) -> None:
     """A customer must never receive a quotation headed by placeholder details."""
     from modules.database import session_scope
@@ -426,6 +473,7 @@ def run() -> Report:
     check_key_agreement(report, settings)
     check_email(report, settings)
     check_company_readiness(report)
+    check_branding_assets(report)
     return report
 
 

@@ -177,10 +177,16 @@ class TestFullLifecycle:
         # ---------------------------------------------------------------- #
         # 5. The customer opens it
         # ---------------------------------------------------------------- #
-        quotation_service.change_status(
-            session, manager, quotation, QuotationStatus.SENT_TO_CUSTOMER
+        # Sending is what puts a quotation in front of a customer, so sending
+        # is what must set the status. This used to be a change_status call
+        # here, and that hand-hold is exactly why the gap survived: send() only
+        # locked the quotation and left it APPROVED, RESPONDABLE_STATUSES is
+        # {SENT_TO_CUSTOMER}, and every real approval came back 400 while this
+        # test stayed green because it made the transition itself.
+        assert quotation.status is QuotationStatus.SENT_TO_CUSTOMER, (
+            "send() must move the quotation into the only status a customer "
+            "may respond to"
         )
-        session.commit()
 
         token = portal_service.resolve_token(session, _token_from(link))
         portal_service.record_view(session, token)
@@ -283,10 +289,8 @@ class TestFullLifecycle:
         # ---------------------------------------------------------------- #
         # 9. The customer accepts, taking the optional line
         # ---------------------------------------------------------------- #
-        quotation_service.change_status(
-            session, manager, revised, QuotationStatus.SENT_TO_CUSTOMER
-        )
-        session.commit()
+        # Same again for the revision: resending is what makes it respondable.
+        assert revised.status is QuotationStatus.SENT_TO_CUSTOMER
 
         new_token = portal_service.resolve_token(session, _token_from(new_link))
         chosen = [

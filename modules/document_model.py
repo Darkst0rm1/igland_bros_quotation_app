@@ -43,9 +43,15 @@ AVAILABLE_COLUMNS: dict[str, str] = {
     "spec": "Specification",
 }
 
+#: ``containers`` sits directly after the quantity it is derived from: the
+#: customer reads "how many packs" and immediately "how many containers that
+#: fills", which is the question an export buyer actually asks. It renders as
+#: empty for any line without a container count, so a quotation that does not
+#: ship in containers simply shows a blank cell rather than a wrong number.
 DEFAULT_COLUMNS = [
     "item", "description", "size", "pack_size",
-    "quantity_packs", "price_per_pack", "price_per_piece", "line_total",
+    "quantity_packs", "containers", "price_per_pack", "price_per_piece",
+    "line_total",
 ]
 
 #: Columns whose values are numeric and should be right-aligned.
