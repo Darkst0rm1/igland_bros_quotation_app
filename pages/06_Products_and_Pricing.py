@@ -80,7 +80,97 @@ if counts["products"] == 0:
     )
 
 st.divider()
-catalogue_tab, pricing_tab, tiers_tab = st.tabs(["Catalogue", "Prices & cost", "Price tiers"])
+catalogue_tab, pricing_tab, tiers_tab, schedule_tab = st.tabs(
+    ["Catalogue", "Prices & cost", "Price tiers", "Price list"]
+)
+
+
+# --------------------------------------------------------------------------- #
+# Price list
+#
+# The schedule sent to customers, rendered from the catalogue rather than kept
+# in a spreadsheet — which is what let the prices a customer held drift from
+# the prices this system stored.
+# --------------------------------------------------------------------------- #
+
+with schedule_tab:
+    st.subheader("Customer price list")
+    st.caption(
+        "Every live variant at its standard price, read from the catalogue at "
+        "the moment you generate it. Selling prices only — cost, freight and "
+        "markup have no field in this document."
+    )
+
+    schedule_a, schedule_b = st.columns(2)
+    with schedule_a:
+        reference = st.text_input(
+            "Reference", value="10001",
+            help="Carried on the document. Not a quotation number.",
+        )
+        issued_on = st.date_input("Issue date", value=dt.date.today())
+    with schedule_b:
+        revision_label = st.text_input(
+            "Revision label", value="Revised",
+            help="Leave blank for an original issue. Shown on the document, "
+                 "which also states that it supersedes earlier prices.",
+        )
+        store_it = st.checkbox(
+            "Also keep a copy in document storage", value=True,
+            help="Stored under price-lists/. Re-issuing the same revision "
+                 "replaces it: the schedule is the current offer, and the "
+                 "history of what a price was lives in the price records.",
+        )
+
+    if st.button("Generate price list", type="primary"):
+        from modules import price_list_document
+
+        try:
+            with session_scope() as db:
+                listing = price_list_document.build(
+                    db, reference=reference.strip() or "—",
+                    issued_on=issued_on,
+                    revision_label=revision_label.strip(),
+                )
+            pdf_bytes = price_list_document.render(listing)
+        except Exception as exc:  # noqa: BLE001 — shown, not swallowed
+            st.error(f"The price list could not be produced: {exc}")
+        else:
+            if not listing.row_count:
+                st.warning(
+                    "No variant has a standard price in force, so the schedule "
+                    "would be empty. Nothing was produced."
+                )
+            else:
+                stored_key = ""
+                if store_it:
+                    try:
+                        stored_key = price_list_document.publish(listing, pdf_bytes)
+                    except Exception as exc:  # noqa: BLE001
+                        st.warning(f"Generated, but not stored: {exc}")
+
+                st.session_state["price_list_pdf"] = pdf_bytes
+                st.session_state["price_list_name"] = (
+                    f"PriceList-{listing.reference}-"
+                    f"{(listing.revision_label or 'Original').replace(' ', '-')}.pdf"
+                )
+                st.session_state["price_list_note"] = (
+                    f"{listing.row_count} products across "
+                    f"{len(listing.groups)} specifications, "
+                    f"{len(pdf_bytes):,} bytes"
+                    + (f" · stored at {stored_key}" if stored_key else "")
+                )
+
+    # Held in session state so the download survives the rerun the button
+    # causes — without this the file vanishes the moment it is produced.
+    if st.session_state.get("price_list_pdf"):
+        st.success(st.session_state["price_list_note"])
+        st.download_button(
+            "Download price list (PDF)",
+            data=st.session_state["price_list_pdf"],
+            file_name=st.session_state["price_list_name"],
+            mime="application/pdf",
+            type="primary",
+        )
 
 
 # --------------------------------------------------------------------------- #

@@ -79,6 +79,68 @@ class TestTheWorkedExample:
         assert gap.quantize(D("0.00000001")) == expected.quantize(D("0.00000001"))
 
 
+class TestReconciliation:
+    """What the formula correction actually moved, at full precision.
+
+    Two different "previous price" figures exist and they are not
+    interchangeable:
+
+    * ``4.30`` — what was stored, taken from the supplier's published schedule,
+      which prints to two places.
+    * ``4.299369…`` — what the old formula produces exactly.
+
+    A difference measured against the rounded figure is the change to a stored
+    record. A difference measured against the exact one is the change caused by
+    the correction, and only that reconciles to ``fob x markup``. Reporting the
+    first as though it were the second overstates or understates the effect by
+    whatever the publisher's rounding happened to be.
+    """
+
+    def _previous_exact(self, build) -> D:  # noqa: ANN001
+        """The old formula: markup on the goods, freight added after."""
+        return (
+            build.unit_cost_per_piece
+            * build.markup_multiplier
+            * build.pieces_per_bundle
+            + build.fob_cost_per_bundle
+        )
+
+    def test_the_difference_reconciles_to_the_markup_on_the_freight(self):
+        build = _build()
+        difference = build.selling_price - self._previous_exact(build)
+        expected = build.fob_cost_per_bundle * build.markup_percentage
+        assert difference.quantize(D("0.0000000001")) == expected.quantize(
+            D("0.0000000001")
+        )
+
+    def test_the_rounded_previous_price_gives_a_different_answer(self):
+        """Which is why the reconciliation must not use the displayed value.
+
+        Against the published 4.30 the 8 inch moves 0.0510; against the exact
+        4.299369 it moves 0.0516. The second is the one the formula explains.
+        """
+        build = _build()
+        against_rounded = build.selling_price - D("4.30")
+        against_exact = build.selling_price - self._previous_exact(build)
+        assert against_rounded.quantize(D("0.0001")) == D("0.0510")
+        assert against_exact.quantize(D("0.0001")) == D("0.0516")
+        assert against_rounded != against_exact
+
+    def test_every_figure_reports_to_four_places(self):
+        build = _build()
+        previous = self._previous_exact(build)
+        for value in (previous, build.selling_price,
+                      build.selling_price - previous):
+            shown = value.quantize(D("0.0001"))
+            assert -shown.as_tuple().exponent == 4
+
+    def test_the_difference_is_always_positive(self):
+        """Marking up freight cannot reduce a price, at any capacity."""
+        for bundles in (D("768"), D("2160"), D("2304"), D("2700")):
+            build = _build(bundles_per_container=bundles)
+            assert build.selling_price > self._previous_exact(build)
+
+
 class TestInputsAreConfiguration:
     def test_zero_fob_is_allowed_and_leaves_only_the_goods(self):
         """An ex-works sale carries no freight. That is a price, not an error."""

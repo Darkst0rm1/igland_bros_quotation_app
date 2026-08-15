@@ -147,6 +147,93 @@ class TestNothingInternalEscapes:
             assert internal not in text, f"{internal!r} reached the PDF"
 
 
+class TestStorage:
+    def test_it_is_kept_apart_from_accepted_quotation_artifacts(self):
+        """``quotes/accepted/`` holds immutable evidence of one acceptance.
+
+        A schedule is neither immutable nor about one customer, and mixing the
+        two would put a re-issuable document in the namespace whose whole
+        guarantee is that nothing in it changes.
+        """
+        assert pld.STORAGE_PREFIX == "price-lists/"
+        assert not pld.STORAGE_PREFIX.startswith("quotes/")
+
+    def test_the_key_is_stable_for_a_reference_and_revision(
+        self, session, catalogue
+    ):
+        """Re-issuing replaces rather than accumulating.
+
+        The schedule is the current offer; the history of what a price was
+        lives in ``product_prices``, which is append-only and dated.
+        """
+        first = pld.build(
+            session, reference="10001", issued_on=TODAY, revision_label="Revised")
+        again = pld.build(
+            session, reference="10001", issued_on=TODAY, revision_label="Revised")
+        assert pld.storage_key(first) == pld.storage_key(again)
+        assert pld.storage_key(first) == "price-lists/2026/08/10001_revised.pdf"
+
+    def test_a_revision_gets_its_own_key(self, session, catalogue):
+        original = pld.build(session, reference="10001", issued_on=TODAY)
+        revised = pld.build(
+            session, reference="10001", issued_on=TODAY, revision_label="Revised")
+        assert pld.storage_key(original) != pld.storage_key(revised)
+        assert pld.storage_key(original).endswith("10001_original.pdf")
+
+    def test_publishing_stores_the_exact_bytes(self, session, catalogue, monkeypatch):
+        written: dict[str, bytes] = {}
+
+        class Fake:
+            def put(self, key, data, content_type=None):  # noqa: ANN001
+                written[key] = data
+                return key
+
+        from modules import storage
+
+        monkeypatch.setattr(storage, "get_storage", lambda: Fake())
+        listing = pld.build(
+            session, reference="10001", issued_on=TODAY, revision_label="Revised")
+        pdf = pld.render(listing)
+        key = pld.publish(listing, pdf)
+        assert written[key] == pdf
+
+    def test_rendering_alone_writes_nothing(self, session, catalogue, monkeypatch):
+        """A preview must not commit anything to storage."""
+        from modules import storage
+
+        def _boom():
+            raise AssertionError("render() reached storage")
+
+        monkeypatch.setattr(storage, "get_storage", _boom)
+        pld.render(pld.build(session, reference="10001", issued_on=TODAY))
+
+
+class TestTurkishRenders:
+    def test_turkish_characters_survive_into_the_pdf(self, session, catalogue):
+        """The base-14 fonts print s-cedilla and dotless-i as black boxes.
+
+        The company is Turkish and its address contains both, so this reached
+        every document the system produced until pdf_primitives registered a
+        Unicode family.
+        """
+        from sqlalchemy import select
+
+        from modules.models import CompanySettings
+
+        company = session.execute(select(CompanySettings)).scalars().first()
+        company.address_line1 = "Kayabaşı Mah., Veysel Karani Cad."
+        company.city = "Başakşehir"
+        company.country = "Türkiye"
+        company.is_placeholder = False
+        session.flush()
+
+        text = _text_of(pld.render(
+            pld.build(session, reference="10001", issued_on=TODAY)
+        ))
+        for word in ("Kayabaşı", "Başakşehir", "Türkiye"):
+            assert word in text, f"{word!r} did not survive rendering"
+
+
 class TestPresentation:
     def test_prices_print_to_four_places(self, session, catalogue):
         rows = [r for g in pld.build(

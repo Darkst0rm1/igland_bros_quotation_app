@@ -216,6 +216,42 @@ def build(
     )
 
 
+#: Object-storage namespace. Deliberately separate from ``quotes/accepted/``:
+#: that prefix holds immutable evidence of what one customer accepted, and a
+#: price schedule is neither immutable nor about one customer.
+STORAGE_PREFIX = "price-lists/"
+
+
+def storage_key(price_list: PriceList) -> str:
+    """Where a rendered schedule lives. Stable for a reference and revision.
+
+    Re-publishing the same revision overwrites rather than accumulating: a
+    schedule is the current offer, not a record of every render. History lives
+    in ``product_prices``, which is append-only and dated.
+    """
+    slug = "".join(
+        c if c.isalnum() or c in "-_" else "-"
+        for c in (price_list.revision_label or "original")
+    ).strip("-").lower()
+    return (
+        f"{STORAGE_PREFIX}{price_list.issued_on:%Y/%m}/"
+        f"{price_list.reference}_{slug}.pdf"
+    )
+
+
+def publish(price_list: PriceList, pdf: bytes) -> str:
+    """Store the rendered schedule and return its key.
+
+    Kept out of :func:`render` so producing a document and committing it to
+    storage stay separable — a preview must not write anything.
+    """
+    from modules.storage import get_storage
+
+    key = storage_key(price_list)
+    get_storage().put(key, pdf, "application/pdf")
+    return key
+
+
 def _terms(session: Session) -> list[tuple[str, str]]:
     """The default terms, which the schedule carries as it always has."""
     from modules.models import TermTemplate
