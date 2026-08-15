@@ -576,6 +576,34 @@ def container_capacity_for_product(
     ).scalars().first()
 
 
+def per_container_from_line(
+    quantity_packs: Decimal | None, container_count: Decimal | None
+) -> Decimal | None:
+    """What the operator actually put on the quotation line, per container.
+
+    The line already carries both halves of this figure. ``quantity_packs`` is
+    what they typed — in pieces, divided down by the pack size — and
+    ``container_count`` opens at one full container and is meant to be typed
+    over, because a mixed or part container is an ordinary thing to quote.
+
+    Deriving the allocation from the catalogue instead replaces both with the
+    standard figure, so the shipping plan quietly disagrees with the line it
+    was built from: the operator enters a custom quantity, and the container
+    still reports the textbook load. Reading the line first makes the custom
+    number the one that counts, and costs nothing when nothing was customised —
+    the container count was itself filled from the same capacity, so the
+    division returns the catalogue figure anyway.
+
+    ``None`` where the line has no usable pair, which leaves the catalogue as
+    the fallback rather than inventing a quantity.
+    """
+    packs = to_decimal(quantity_packs or 0)
+    count = to_decimal(container_count or 0)
+    if packs <= 0 or count <= 0:
+        return None
+    return q_quantity(packs / count)
+
+
 def allocate_product(
     session: Session,
     user: AuthUser,
@@ -590,9 +618,11 @@ def allocate_product(
 ) -> ShipmentProductAllocation:
     """Assign a quotation line to a container.
 
-    ``quantity_per_container`` is derived from the recorded container capacity
-    when it is left blank and capacity exists; otherwise it must be supplied.
-    Nothing is guessed.
+    Left blank, ``quantity_per_container`` comes from the line itself — its
+    quantity over its container count, both of which the operator typed. Only
+    where the line does not carry that pair does the recorded container
+    capacity stand in, and where neither exists it must be supplied. Nothing is
+    guessed.
     """
     require(user, Perm.SHIPMENT_EDIT)
     require_edit_quotation(user, quotation)
@@ -611,18 +641,30 @@ def allocate_product(
             capacity = container_capacity(
                 session, variant.product_id,
                 container.container_size, container.container_type,
+                variant_id=item.product_variant_id,
             )
 
-    if bundles_per_container is None and capacity is not None:
-        bundles_per_container = capacity.bundles_per_container
+    # The line before the catalogue. An explicit argument still wins over both.
+    if quantity_per_container is None:
+        quantity_per_container = per_container_from_line(
+            item.quantity_packs, item.container_count
+        )
     if quantity_per_container is None:
         if capacity is None:
             raise ShippingError(
                 "No container capacity is recorded for this product, so the quantity "
-                "per container cannot be derived. Enter it, or import the "
-                "bundles-per-container workbook."
+                "per container cannot be derived. Enter it, set the number of "
+                "containers on the line, or import the bundles-per-container "
+                "workbook."
             )
         quantity_per_container = capacity.bundles_per_container
+
+    # Bundles track the quantity being loaded, not the textbook load, or the
+    # row would report a per-container quantity and a bundle count that
+    # contradict each other -- and pieces per container is computed from the
+    # bundle count, so the contradiction would reach the shipping document.
+    if bundles_per_container is None:
+        bundles_per_container = quantity_per_container
 
     existing = session.execute(
         select(ShipmentProductAllocation).where(
@@ -737,6 +779,7 @@ def recalculate_allocations(session: Session, container: ShipmentContainer) -> N
                 capacity = container_capacity(
                     session, variant.product_id,
                     container.container_size, container.container_type,
+                    variant_id=item.product_variant_id,
                 )
         _recalculate_allocation(session, allocation, container, item, capacity)
     session.flush()

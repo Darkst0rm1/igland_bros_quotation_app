@@ -634,9 +634,14 @@ class TestCapacityImport:
 
 
 class TestAllocation:
-    def test_quantities_derive_from_recorded_capacity(
+    def test_capacity_stands_in_when_the_line_has_no_container_count(
         self, session, admin, quotation, carrier
     ):
+        """The fallback, not the main path.
+
+        This fixture's lines carry a quantity but no container count, so there
+        is nothing on the line to divide by and the catalogue answers.
+        """
         from modules.capacity_importer import commit
 
         plan = read_workbook(TestCapacityImport._workbook([('12" White', 1880)]))
@@ -647,6 +652,7 @@ class TestAllocation:
             session, admin, quotation, carrier, ContainerSize.FORTY_FT_HC, count="3"
         )
         line = quotation.items[0]
+        assert line.container_count == D("0")
         allocation = shipping_service.allocate_product(
             session, admin, quotation, container.id, line.id
         )
@@ -655,10 +661,128 @@ class TestAllocation:
         assert allocation.quantity_per_container == D("1880")
         assert allocation.total_allocated_quantity == D("5640")  # 1880 x 3
 
-    def test_without_capacity_the_quantity_must_be_supplied(
+    def test_the_line_is_read_before_the_catalogue(
+        self, session, admin, quotation, carrier
+    ):
+        """The reported defect: a typed quantity replaced by the standard load.
+
+        The operator quotes 1,000 packs across two containers. The catalogue
+        says a 40 ft HC holds 1,880 of them. Five hundred is the answer, and
+        1,880 is a figure nobody entered — it would put 3,760 packs on a
+        quotation that sells 1,000.
+        """
+        from modules.capacity_importer import commit
+
+        plan = read_workbook(TestCapacityImport._workbook([('12" White', 1880)]))
+        commit(session, admin, plan, "bundles.xlsx")
+        session.commit()
+
+        line = quotation.items[0]
+        quotation_service.update_line(
+            session, admin, quotation, line.id, container_count=D("2")
+        )
+        session.commit()
+
+        container = _add(
+            session, admin, quotation, carrier, ContainerSize.FORTY_FT_HC, count="2"
+        )
+        allocation = shipping_service.allocate_product(
+            session, admin, quotation, container.id, line.id
+        )
+        session.commit()
+
+        assert allocation.quantity_per_container == D("500")
+        assert allocation.total_allocated_quantity == D("1000") == line.quantity_packs
+
+    def test_bundles_per_container_tracks_the_quantity_loaded(
+        self, session, admin, quotation, carrier
+    ):
+        """Otherwise one row states two different loads.
+
+        Pieces per container is computed from the bundle count, so a bundle
+        count left at the catalogue figure while the quantity follows the line
+        prints a piece count for a container nobody is shipping.
+        """
+        from modules.capacity_importer import commit
+
+        plan = read_workbook(TestCapacityImport._workbook([('12" White', 1880)]))
+        commit(session, admin, plan, "bundles.xlsx")
+        session.commit()
+
+        line = quotation.items[0]
+        quotation_service.update_line(
+            session, admin, quotation, line.id, container_count=D("4")
+        )
+        session.commit()
+
+        container = _add(session, admin, quotation, carrier, ContainerSize.FORTY_FT_HC)
+        allocation = shipping_service.allocate_product(
+            session, admin, quotation, container.id, line.id
+        )
+        session.commit()
+
+        assert allocation.quantity_per_container == D("250")
+        assert allocation.bundles_per_container == allocation.quantity_per_container
+
+    def test_an_explicit_quantity_still_beats_the_line(
+        self, session, admin, quotation, carrier
+    ):
+        """Loading one container differently is a real thing to do."""
+        line = quotation.items[0]
+        quotation_service.update_line(
+            session, admin, quotation, line.id, container_count=D("2")
+        )
+        session.commit()
+
+        container = _add(session, admin, quotation, carrier, ContainerSize.FORTY_FT_HC)
+        allocation = shipping_service.allocate_product(
+            session, admin, quotation, container.id, line.id,
+            quantity_per_container=D("321"),
+        )
+        session.commit()
+        assert allocation.quantity_per_container == D("321")
+
+    def test_capacity_is_read_for_the_line_s_own_board_quality(
+        self, session, admin, quotation, carrier
+    ):
+        """The supplier states a different container load per quality.
+
+        A product-wide lookup answers with whichever quality happens to be on
+        file, so a heavier board reports the lighter board's load.
+        """
+        from modules.models import ProductContainerCapacity
+        from modules.repositories import get_variant
+
+        line = quotation.items[0]
+        variant = get_variant(session, line.product_variant_id)
+        session.add(ProductContainerCapacity(
+            product_id=variant.product_id, product_variant_id=None,
+            container_size=ContainerSize.FORTY_FT_HC,
+            container_type=ContainerType.DRY,
+            bundles_per_container=D("2304"),
+        ))
+        session.add(ProductContainerCapacity(
+            product_id=variant.product_id, product_variant_id=variant.id,
+            container_size=ContainerSize.FORTY_FT_HC,
+            container_type=ContainerType.DRY,
+            bundles_per_container=D("2160"),
+        ))
+        session.commit()
+
+        container = _add(session, admin, quotation, carrier, ContainerSize.FORTY_FT_HC)
+        allocation = shipping_service.allocate_product(
+            session, admin, quotation, container.id, line.id
+        )
+        session.commit()
+        assert allocation.quantity_per_container == D("2160"), (
+            "took the product-wide row over this variant's own"
+        )
+
+    def test_without_capacity_or_a_container_count_the_quantity_is_required(
         self, session, admin, quotation, carrier
     ):
         container = _add(session, admin, quotation, carrier, ContainerSize.TWENTY_FT)
+        assert quotation.items[0].container_count == D("0")
         with pytest.raises(ShippingError, match="cannot be derived"):
             shipping_service.allocate_product(
                 session, admin, quotation, container.id, quotation.items[0].id

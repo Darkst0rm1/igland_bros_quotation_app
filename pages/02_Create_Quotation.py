@@ -1163,12 +1163,22 @@ with shipping_tab:
                     key="allocate_line",
                 )
             with allocate_b:
+                line_derived = shipping_service.per_container_from_line(
+                    allocate_line["quantity_packs"],
+                    allocate_line["container_count"],
+                )
                 per_container = st.number_input(
-                    "Quantity per container (0 = derive)",
+                    "Quantity per container (0 = take it from the line)",
                     min_value=0.0, step=100.0, value=0.0,
                     help=(
+                        f"Left at 0, this line gives "
+                        f"{format_quantity(line_derived)} packs per container — "
+                        f"its own quantity over its own container count. Type a "
+                        f"figure here only to load this container differently."
+                        if line_derived is not None else
                         "Left at 0, the figure comes from the recorded "
-                        "bundles-per-container for this product."
+                        "bundles-per-container for this product, because this "
+                        "line has no container count of its own to divide by."
                     ),
                 )
             if st.button("Assign to container"):
