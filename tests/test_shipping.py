@@ -383,6 +383,33 @@ class TestFreight:
     def test_freight_per_container(self, session, shipped):
         assert shipping_service.freight_per_container(session, shipped.id) == D("2766.67")
 
+    def test_a_new_shipment_bills_nothing_until_the_method_is_changed(
+        self, session, shipped
+    ):
+        """The path a real quotation actually takes, which nothing else covers.
+
+        Every other test in this class sets the freight method by hand before
+        asserting, so none of them observes what a shipment created through the
+        page does: it takes the model default, ``INCLUDED``, and bills nothing.
+        Freight is entered, totalled and displayed, and the grand total does not
+        move — correct by design, and invisible unless the page says so.
+
+        The default was put to the business on 2026-08-15, with the argument
+        for changing it — ``settings_service.total_fob_cost`` says the $700 per
+        container inside the price is "distinct from the ocean freight quoted
+        to a customer" — and ``INCLUDED`` was kept deliberately. So it stays,
+        and the Shipping tab now warns whenever freight is recorded that the
+        quotation is not billing, which is what was actually missing.
+
+        Pinned here so the default is a decision somebody made rather than one
+        nobody noticed. Changing it should break this test and be argued for.
+        """
+        shipment = shipping_service.get_shipment(session, shipped.id)
+        assert shipment.freight_method is FreightMethod.INCLUDED
+        assert shipment.total_freight == D("8300.00")
+        assert self._charges(session, shipped.id) == []
+        assert shipped.grand_total == shipped.subtotal
+
     def test_included_freight_creates_no_charge(self, session, admin, shipped):
         shipping_service.update_shipment(
             session, admin, shipped, freight_method=FreightMethod.INCLUDED

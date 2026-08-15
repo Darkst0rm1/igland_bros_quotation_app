@@ -938,6 +938,37 @@ with shipping_tab:
             summary_c.metric("Total freight", "—")
             st.caption("Freight figures require the shipment.view_freight permission.")
 
+        # Whether that figure reaches the quotation belongs beside the figure.
+        # Only ADDED_SEPARATELY becomes a charge; the reason used to be stated
+        # in a caption at the foot of Route and freight, several sections down,
+        # so freight could be entered, totalled, displayed in a headline metric
+        # and still be absent from the quotation with nothing on screen saying
+        # so. A number that changes no total has to announce that itself.
+        if can_see_freight and shipment["total_freight"] > 0:
+            freight_shown = format_money(
+                shipment["total_freight"], shipment["freight_currency"]
+            )
+            if shipment["freight_method"] is FreightMethod.ADDED_SEPARATELY:
+                st.success(
+                    f"{freight_shown} is on the quotation as a single freight "
+                    f"charge, maintained from the container rows."
+                )
+            else:
+                st.warning(
+                    f"**This freight is not on the quotation.** {freight_shown} is "
+                    f"recorded against the shipment only, because the freight "
+                    f"method is *"
+                    f"{FREIGHT_METHOD_LABELS[shipment['freight_method']]}*. To "
+                    f"bill it, change that to *"
+                    f"{FREIGHT_METHOD_LABELS[FreightMethod.ADDED_SEPARATELY]}* "
+                    f"under **Route and freight** below."
+                    + (
+                        "" if editable else
+                        " This quotation is no longer editable, so that change "
+                        "needs a revision."
+                    )
+                )
+
     if container_rows:
         st.markdown("##### Containers")
         table = []
