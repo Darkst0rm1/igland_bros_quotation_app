@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from io import BytesIO
 
 from sqlalchemy import select
@@ -38,6 +38,19 @@ from modules.pdf_primitives import (
 #: rounded to cents moves a 2,304-bundle container by up to eleven dollars, and
 #: the third and fourth places are where the freight share lands.
 PRICE_EXP = Decimal("0.0001")
+
+#: Half-up, matching ``calculation_engine``, which states that every stored
+#: money value rounds that way. ``Decimal.quantize`` defaults to half-*even*,
+#: and prices land on an exact tie often enough for it to matter: three of the
+#: eighteen in this catalogue do, because a 17% markup on a six-decimal cost
+#: puts a 5 in the fifth place. Under the default they printed a hundredth of a
+#: cent below what the system holds — small per bundle, and a document that
+#: rounds by a different rule than the quotation it is quoted against.
+PRICE_ROUNDING = ROUND_HALF_UP
+
+
+def _shown(value: Decimal) -> Decimal:
+    return value.quantize(PRICE_EXP, rounding=PRICE_ROUNDING)
 
 COLUMNS = ["product", "depth", "flute", "case", "quality", "pack", "piece"]
 HEADINGS = {
@@ -65,8 +78,8 @@ class PriceListRow:
         return [
             self.product, self.depth, self.flute, str(self.case_pack),
             self.quality,
-            f"${self.price_per_pack.quantize(PRICE_EXP)}",
-            f"${self.price_per_piece.quantize(PRICE_EXP)}",
+            f"${_shown(self.price_per_pack)}",
+            f"${_shown(self.price_per_piece)}",
         ]
 
 

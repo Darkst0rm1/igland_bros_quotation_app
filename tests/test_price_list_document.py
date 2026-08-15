@@ -243,6 +243,37 @@ class TestPresentation:
             assert pack.startswith("$")
             assert len(pack.split(".")[1]) == 4, pack
 
+    def test_a_price_on_an_exact_tie_rounds_half_up(self, session, admin, variant):
+        """``Decimal.quantize`` defaults to half-*even*, the engine says half-up.
+
+        A 17% markup on a six-decimal cost puts a 5 in the fifth place often
+        enough to matter — three of the eighteen prices in the live catalogue
+        land on an exact tie — and under the default they printed a hundredth
+        of a cent below what the system holds. A document that rounds by a
+        different rule than the quotation it is quoted against is a query
+        waiting to happen.
+        """
+        from modules.catalogue_service import set_price
+        from modules.validation import PriceInput
+
+        set_price(session, admin, PriceInput(
+            product_variant_id=variant.id, price_tier_code="STANDARD",
+            price_per_pack=D("5.166850"), price_per_piece=D("0.103337"),
+            effective_from=dt.date(2026, 8, 8),
+        ))
+        session.flush()
+
+        listing = pld.build(session, reference="10001", issued_on=TODAY)
+        row = next(
+            r for g in listing.groups for r in g.rows
+            if r.price_per_pack == D("5.166850")
+        )
+        assert row.cells()[5] == "$5.1669", "rounded half-even, not half-up"
+        assert D("5.166850").quantize(D("0.0001")) == D("5.1668"), (
+            "the default really is half-even; this test would be vacuous "
+            "if that ever changed"
+        )
+
     def test_it_is_marked_as_a_revision_when_one(self, session, catalogue):
         listing = pld.build(
             session, reference="10001", issued_on=TODAY, revision_label="Revised",
