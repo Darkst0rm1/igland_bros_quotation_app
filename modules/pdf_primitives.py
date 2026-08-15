@@ -28,6 +28,61 @@ BAND = colors.HexColor("#eef1f5")
 PAGE_SIZES = {"A4": A4, "LETTER": LETTER}
 
 
+# --------------------------------------------------------------------------- #
+# Fonts
+# --------------------------------------------------------------------------- #
+
+#: The base-14 fonts every PDF library defaults to are Latin-1 only. The
+#: company is Turkish, so its own address contains ş, ı and İ — none of which
+#: exist in Helvetica, and each of which ReportLab renders as a filled black
+#: box. Every quotation, every accepted artifact and every price list carried
+#: those boxes, in the company's address block, on documents sent to customers.
+#:
+#: Bitstream Vera ships inside ReportLab, so this costs no new dependency and
+#: is present wherever the worker runs, which a system font path would not be.
+#: It covers Latin Extended-A, which is what Turkish needs.
+FONT = "Vera"
+FONT_BOLD = "Vera-Bold"
+FONT_ITALIC = "Vera-Italic"
+
+_FILES = {
+    FONT: "Vera.ttf",
+    FONT_BOLD: "VeraBd.ttf",
+    FONT_ITALIC: "VeraIt.ttf",
+    "Vera-BoldItalic": "VeraBI.ttf",
+}
+
+
+def register_fonts() -> str:
+    """Register the Unicode family, once. Returns the base font name.
+
+    Idempotent: ReportLab keeps a process-wide registry and re-registering the
+    same name is wasted work in a worker that renders continuously.
+    """
+    import pathlib
+
+    import reportlab
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    if FONT in pdfmetrics.getRegisteredFontNames():
+        return FONT
+
+    folder = pathlib.Path(reportlab.__file__).parent / "fonts"
+    for name, filename in _FILES.items():
+        pdfmetrics.registerFont(TTFont(name, str(folder / filename)))
+
+    # So <b> and <i> in paragraph markup resolve within the family rather than
+    # falling back to Helvetica and reintroducing the boxes on bold text alone.
+    from reportlab.lib.fonts import addMapping
+
+    addMapping(FONT, 0, 0, FONT)
+    addMapping(FONT, 1, 0, FONT_BOLD)
+    addMapping(FONT, 0, 1, FONT_ITALIC)
+    addMapping(FONT, 1, 1, "Vera-BoldItalic")
+    return FONT
+
+
 def escape(text: str) -> str:
     """Escape for ReportLab's mini-markup, keeping newlines as line breaks.
 
@@ -46,9 +101,15 @@ def escape(text: str) -> str:
 
 
 def base_styles() -> dict[str, ParagraphStyle]:
-    """The shared paragraph styles, by name."""
+    """The shared paragraph styles, by name.
+
+    Every style names the Unicode family explicitly. Inheriting from
+    ``getSampleStyleSheet`` would inherit Helvetica, which has no Turkish
+    glyphs and prints them as black boxes.
+    """
+    register_fonts()
     base = getSampleStyleSheet()
-    return {
+    styles = {
         "company": ParagraphStyle(
             "company", parent=base["Title"], fontSize=16, leading=19,
             textColor=INK, alignment=0, spaceAfter=2,
@@ -81,15 +142,15 @@ def base_styles() -> dict[str, ParagraphStyle]:
         ),
         "head": ParagraphStyle(
             "head", parent=base["Normal"], fontSize=7.5, leading=10,
-            textColor=MUTED, fontName="Helvetica-Bold",
+            textColor=MUTED, fontName=FONT_BOLD,
         ),
         "head_right": ParagraphStyle(
             "head_right", parent=base["Normal"], fontSize=7.5, leading=10,
-            alignment=TA_RIGHT, textColor=MUTED, fontName="Helvetica-Bold",
+            alignment=TA_RIGHT, textColor=MUTED, fontName=FONT_BOLD,
         ),
         "section": ParagraphStyle(
             "section", parent=base["Normal"], fontSize=10, leading=13,
-            textColor=INK, fontName="Helvetica-Bold", spaceBefore=8, spaceAfter=4,
+            textColor=INK, fontName=FONT_BOLD, spaceBefore=8, spaceAfter=4,
         ),
         # The money block. Subtotal rows stay quiet so the grand total, which
         # is the number the customer is actually being asked about, carries the
@@ -104,7 +165,7 @@ def base_styles() -> dict[str, ParagraphStyle]:
         ),
         "grand_label": ParagraphStyle(
             "grand_label", parent=base["Normal"], fontSize=8.5, leading=12,
-            textColor=MUTED, fontName="Helvetica-Bold",
+            textColor=MUTED, fontName=FONT_BOLD,
         ),
         "grand_value": ParagraphStyle(
             "grand_value", parent=base["Title"], fontSize=16, leading=19,
@@ -118,6 +179,15 @@ def base_styles() -> dict[str, ParagraphStyle]:
             textColor=MUTED, alignment=TA_CENTER,
         ),
     }
+
+    # Applied here rather than on each style above: every one inherits from the
+    # sample stylesheet, whose font is Helvetica, and missing a single style
+    # would put black boxes in one paragraph of an otherwise correct document.
+    # The bold styles already name their own face and keep it.
+    for style in styles.values():
+        if style.fontName not in (FONT_BOLD, FONT_ITALIC):
+            style.fontName = FONT
+    return styles
 
 
 def money_block(
