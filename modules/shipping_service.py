@@ -493,39 +493,56 @@ def container_capacity(
     product_id: int,
     container_size: ContainerSize,
     container_type: ContainerType,
+    variant_id: int | None = None,
 ) -> ProductContainerCapacity | None:
     """Capacity for a product in a given container, if it has been recorded.
 
     Falls back to the same size in a Dry container before giving up, because the
     source data is published per size and most types share a footprint.
+
+    Where ``variant_id`` is given, a row for that board quality is preferred and
+    a product-wide row used only if it has none. Two fallbacks compose here, and
+    the order matters: a variant's own figure in a Dry container is a better
+    answer than another quality's figure in the exact container asked for.
     """
-    exact = session.execute(
-        select(ProductContainerCapacity).where(
+    def _lookup(ctype: ContainerType) -> ProductContainerCapacity | None:
+        base = select(ProductContainerCapacity).where(
             ProductContainerCapacity.product_id == product_id,
             ProductContainerCapacity.container_size == container_size,
-            ProductContainerCapacity.container_type == container_type,
+            ProductContainerCapacity.container_type == ctype,
         )
-    ).scalar_one_or_none()
-    if exact is not None:
-        return exact
-    return session.execute(
-        select(ProductContainerCapacity).where(
-            ProductContainerCapacity.product_id == product_id,
-            ProductContainerCapacity.container_size == container_size,
-            ProductContainerCapacity.container_type == ContainerType.DRY,
-        )
-    ).scalar_one_or_none()
+        if variant_id is not None:
+            hit = session.execute(
+                base.where(
+                    ProductContainerCapacity.product_variant_id == variant_id
+                )
+            ).scalar_one_or_none()
+            if hit is not None:
+                return hit
+        return session.execute(
+            base.where(ProductContainerCapacity.product_variant_id.is_(None))
+        ).scalar_one_or_none()
+
+    return _lookup(container_type) or _lookup(ContainerType.DRY)
 
 
 def container_capacity_for_product(
-    session: Session, product_id: int
+    session: Session,
+    product_id: int,
+    variant_id: int | None = None,
 ) -> ProductContainerCapacity | None:
-    """Whatever capacity is on file for a product, without naming a container.
+    """Whatever capacity is on file, without naming a container.
 
     For the line editor, which is showing the operator a figure before any
     container has been chosen. Prefers the configured default container, then
     the largest recorded capacity, so a catalogue holding only 20 ft rows still
     shows something rather than nothing.
+
+    ``variant_id`` selects capacity for one board quality. Supply it wherever
+    the variant is known: the supplier states different container quantities
+    per quality — 2,160 bundles against 2,304 on the same 8 inch box — and
+    prices from them, so omitting it silently applies another quality's figure.
+    A product-wide row is used when the variant has none of its own.
     """
     from modules import settings_service
 
@@ -534,14 +551,28 @@ def container_capacity_for_product(
         product_id,
         settings_service.default_container_size(session),
         settings_service.default_container_type(session),
+        variant_id=variant_id,
     )
     if preferred is not None:
         return preferred
 
+    stmt = select(ProductContainerCapacity).where(
+        ProductContainerCapacity.product_id == product_id
+    )
+    if variant_id is not None:
+        # Variant rows first, then the product-wide fallback; largest within
+        # each group. ``is_(None)`` sorts after a match on every backend
+        # because False < True.
+        specific = session.execute(
+            stmt.where(ProductContainerCapacity.product_variant_id == variant_id)
+            .order_by(ProductContainerCapacity.bundles_per_container.desc())
+        ).scalars().first()
+        if specific is not None:
+            return specific
+        stmt = stmt.where(ProductContainerCapacity.product_variant_id.is_(None))
+
     return session.execute(
-        select(ProductContainerCapacity)
-        .where(ProductContainerCapacity.product_id == product_id)
-        .order_by(ProductContainerCapacity.bundles_per_container.desc())
+        stmt.order_by(ProductContainerCapacity.bundles_per_container.desc())
     ).scalars().first()
 
 

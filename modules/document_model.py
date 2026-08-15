@@ -16,7 +16,7 @@ import datetime as dt
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import or_ as sa_or, select
 from sqlalchemy.orm import Session
 
 from modules import settings_service
@@ -342,9 +342,17 @@ def _derived_containers(session: Session, items) -> dict[int, str]:  # noqa: ANN
         if variant is None:
             continue
         capacity = session.execute(
-            select(ProductContainerCapacity).where(
-                ProductContainerCapacity.product_id == variant.product_id
+            select(ProductContainerCapacity)
+            .where(
+                ProductContainerCapacity.product_id == variant.product_id,
+                sa_or(
+                    ProductContainerCapacity.product_variant_id == variant.id,
+                    ProductContainerCapacity.product_variant_id.is_(None),
+                ),
             )
+            # This variant's own figure first. Board qualities of one size do
+            # not share a container quantity, whatever geometry suggests.
+            .order_by(ProductContainerCapacity.product_variant_id.is_(None))
         ).scalars().first()
         share = containers_for_quantity(item.quantity_packs, capacity)
         if share is not None:

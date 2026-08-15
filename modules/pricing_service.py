@@ -19,7 +19,7 @@ from collections import Counter
 from dataclasses import dataclass
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import or_ as sa_or, select
 from sqlalchemy.orm import Session
 
 from modules import settings_service
@@ -367,9 +367,18 @@ def _estimated_container_total(
         if variant is None:
             continue
         capacity = session.execute(
-            select(ProductContainerCapacity).where(
-                ProductContainerCapacity.product_id == variant.product_id
+            select(ProductContainerCapacity)
+            .where(
+                ProductContainerCapacity.product_id == variant.product_id,
+                sa_or(
+                    ProductContainerCapacity.product_variant_id == variant.id,
+                    ProductContainerCapacity.product_variant_id.is_(None),
+                ),
             )
+            # This board quality's own figure before the product-wide one:
+            # the supplier states different container quantities per quality
+            # and prices from them.
+            .order_by(ProductContainerCapacity.product_variant_id.is_(None))
         ).scalars().first()
         share = containers_for_quantity(item.quantity_packs, capacity)
         if share is not None:

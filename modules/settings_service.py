@@ -166,6 +166,43 @@ def max_items_per_container(session: Session) -> int:
     return get_int(session, "max_items_per_container", 3)
 
 
+# --------------------------------------------------------------------------- #
+# Supplier price build
+#
+# The three inputs to modules.supplier_pricing. Configuration rather than
+# constants because every one of them moves: freight with the market, markup
+# with a commercial decision, and a bundle with whatever the supplier ships.
+# --------------------------------------------------------------------------- #
+
+def pieces_per_bundle(session: Session) -> Decimal:
+    """Boxes in a bundle, when a product does not state its own.
+
+    ``Product.units_per_bundle`` wins where it is set — a bundle is a property
+    of the product, not of the company — and this is the fallback for a build
+    quoted before the product exists.
+    """
+    return get_decimal(session, "pieces_per_bundle", Decimal("50"))
+
+
+def total_fob_cost(session: Session) -> Decimal:
+    """Cost of getting one container to the ship, shared across its bundles.
+
+    Distinct from the ocean freight quoted to a customer: this is a cost inside
+    the selling price, that is a charge on top of it.
+    """
+    return get_decimal(session, "total_fob_cost", Decimal("700"))
+
+
+def markup_percentage(session: Session) -> Decimal:
+    """Taken on the complete cost, freight included. A rate, not a multiplier.
+
+    Stored as ``0.17`` for 17%. The multiplier ``1.17`` is derived in
+    ``supplier_pricing`` so the two cannot drift apart, and it is deliberately
+    not called a margin: 17% on cost is 14.53% on price.
+    """
+    return get_decimal(session, "markup_percentage", Decimal("0.17"))
+
+
 def max_custom_discount_pct(session: Session) -> Decimal:
     """How far below the standard price a custom price may go before it trips
     the CUSTOM_PRICE_BELOW_FLOOR warning."""

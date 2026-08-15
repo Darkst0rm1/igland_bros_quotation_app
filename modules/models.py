@@ -1740,6 +1740,13 @@ class ProductContainerCapacity(Base, TimestampMixin):
     product_id: Mapped[int] = mapped_column(
         ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    #: Set where the figure is stated for one board quality. NULL means it
+    #: applies to every variant of the product — which is what the older
+    #: per-size workbook gave, and is still true of it. The lookup prefers a
+    #: variant row and falls back to this one.
+    product_variant_id: Mapped[int | None] = mapped_column(
+        ForeignKey("product_variants.id", ondelete="CASCADE"), index=True
+    )
     container_size: Mapped[ContainerSize] = mapped_column(
         _enum(ContainerSize), nullable=False, default=ContainerSize.FORTY_FT_HC
     )
@@ -1761,9 +1768,13 @@ class ProductContainerCapacity(Base, TimestampMixin):
     created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
 
     product: Mapped[Product] = relationship()
+    variant: Mapped[ProductVariant | None] = relationship()
 
     __table_args__ = (
-        UniqueConstraint("product_id", "container_size", "container_type"),
+        # Uniqueness is enforced by two partial indexes created in migration
+        # b7c1e4f8a903, not here: one row per variant, plus one product-wide
+        # fallback row. A single constraint over a nullable column would not
+        # constrain the fallback at all, because NULLs do not collide.
         CheckConstraint("bundles_per_container > 0", name="bundles_positive"),
     )
 
@@ -1786,7 +1797,14 @@ class ProductContainerCapacity(Base, TimestampMixin):
         """
         pieces = self.pieces_per_container
         case_pack = None
-        if self.product is not None:
+        if self.variant is not None and self.variant.case_pack:
+            # The row states which variant it is for, so there is nothing to
+            # infer. This is the whole point of keying capacity per variant.
+            case_pack = self.variant.case_pack
+        elif self.product is not None:
+            # A product-wide row: fall back to any variant's case pack. This is
+            # a guess where variants disagree, which is why a variant-specific
+            # row outranks it.
             case_pack = next(
                 (v.case_pack for v in self.product.variants if v.case_pack), None
             )

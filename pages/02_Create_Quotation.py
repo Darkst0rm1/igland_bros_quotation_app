@@ -594,7 +594,7 @@ with lines_tab:
                     db, variant["id"], header["quote_date"], ccy
                 )
                 capacity = shipping_service.container_capacity_for_product(
-                    db, product_id
+                    db, product_id, variant_id=variant["id"]
                 )
                 bundle = (
                     {
