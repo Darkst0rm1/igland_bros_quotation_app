@@ -205,39 +205,62 @@ def money_block(
     pushes the amount column past the right margin: the labels print, the
     figures do not. ``extract_text`` still finds the numbers in the content
     stream, so a text-presence test cannot catch it.
+
+    **Row order is the caller's.** This used to draw every quiet row and then
+    every emphasised one, which was indistinguishable from preserving order for
+    as long as the grand total happened to be last. It stopped being so the
+    moment a deposit and balance were added below the total: they were hoisted
+    above it and read as components summing into it, which is the opposite of
+    what they are. Consecutive rows of the same weight are grouped into one
+    table, and the groups are stacked in the order given.
     """
+    from itertools import groupby
+
     from reportlab.platypus import Paragraph, Spacer
 
     block = width * 0.52
-    quiet = [(label, amount) for label, amount, emphasis in rows if not emphasis]
-    grand = [(label, amount) for label, amount, emphasis in rows if emphasis]
-
     stacked: list = []
 
-    if quiet:
-        quiet_table = Table(
-            [
+    for emphasised, group in groupby(rows, key=lambda row: bool(row[2])):
+        run = [(label, amount) for label, amount, _ in group]
+        if not emphasised:
+            quiet_table = Table(
                 [
-                    Paragraph(escape(label), styles["total_label"]),
-                    Paragraph(escape(amount), styles["total_value"]),
-                ]
-                for label, amount in quiet
-            ],
-            colWidths=[block * 0.58, block * 0.42],
-        )
-        quiet_table.setStyle(
-            TableStyle([
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("TOPPADDING", (0, 0), (-1, -1), 4),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-                ("LEFTPADDING", (0, 0), (-1, -1), 8),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-                ("LINEBELOW", (0, 0), (-1, -2), 0.25, RULE),
-            ])
-        )
-        stacked.append(quiet_table)
+                    [
+                        Paragraph(escape(label), styles["total_label"]),
+                        Paragraph(escape(amount), styles["total_value"]),
+                    ]
+                    for label, amount in run
+                ],
+                colWidths=[block * 0.58, block * 0.42],
+            )
+            quiet_table.setStyle(
+                TableStyle([
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("TOPPADDING", (0, 0), (-1, -1), 4),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                    ("LINEBELOW", (0, 0), (-1, -2), 0.25, RULE),
+                ])
+            )
+            stacked.append(quiet_table)
+            continue
 
-    for label, amount in grand:
+        stacked.extend(_grand_tables(run, styles, block))
+
+    if not stacked:
+        return Spacer(1, 0)
+
+    return _wrap_money_block(stacked, width, block)
+
+
+def _grand_tables(rows: list[tuple[str, str]], styles: dict, block: float) -> list:
+    """The emphasised rows, one banded table each."""
+    from reportlab.platypus import Paragraph
+
+    stacked: list = []
+    for label, amount in rows:
         grand_table = Table(
             [[
                 Paragraph(escape(label.upper()), styles["grand_label"]),
@@ -258,9 +281,11 @@ def money_block(
         )
         stacked.append(grand_table)
 
-    if not stacked:
-        return Spacer(1, 0)
+    return stacked
 
+
+def _wrap_money_block(stacked: list, width: float, block: float):  # noqa: ANN201
+    """Stack the groups and push the whole block to the right margin."""
     inner = Table([[flowable] for flowable in stacked], colWidths=[block])
     inner.setStyle(
         TableStyle([

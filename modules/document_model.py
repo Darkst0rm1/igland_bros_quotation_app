@@ -20,6 +20,7 @@ from sqlalchemy import or_ as sa_or, select
 from sqlalchemy.orm import Session
 
 from modules import settings_service
+from modules.calculation_engine import deposit_amount
 from modules.constants import STATUS_DISPLAY_NAMES, ISSUED_STATUSES, QuotationStatus
 from modules.models import Quotation
 from modules.utilities import compose_spec_text, format_money, format_quantity
@@ -220,17 +221,34 @@ SHIPPING_COLUMNS: dict[str, str] = {
 def _build_shipping(session: Session, quotation: Quotation) -> DocumentShipping | None:
     """The shipping section, or ``None`` when it should not appear.
 
-    Opt-in per quotation. Anything not filled in is dropped from the table
-    rather than printed empty, so a partly-completed shipment still reads
+    On by default per quotation. Anything not filled in is dropped from the
+    table rather than printed empty, so a partly-completed shipment still reads
     cleanly.
+
+    Containers are **queried**, not read off ``shipment.containers``. The
+    session factory sets ``expire_on_commit=False``, so a collection loaded
+    before a container was written stays stale for the rest of the session —
+    and the two places that generate a document most often are the page that
+    has just added one and ``create_revision``, which has just copied them all.
+    Rendering QT-2026-0012's revision printed a freight line reading "2
+    containers" above a table listing one, from a session that had loaded the
+    collection while it was empty. ``shipping_service`` already queries for
+    exactly this reason; this did not.
     """
     from modules.constants import FREIGHT_METHOD_LABELS, FreightMethod
+    from modules.models import ShipmentContainer
 
     shipment = quotation.shipment
     if shipment is None or not shipment.show_on_document:
         return None
 
-    containers = sorted(shipment.containers, key=lambda c: c.sort_order)
+    containers = list(
+        session.execute(
+            select(ShipmentContainer)
+            .where(ShipmentContainer.quotation_shipment_id == shipment.id)
+            .order_by(ShipmentContainer.sort_order)
+        ).scalars()
+    )
     if not containers:
         return None
 
@@ -276,7 +294,9 @@ def _build_shipping(session: Session, quotation: Quotation) -> DocumentShipping 
         from modules.constants import LOADING_METHOD_LABELS
 
         summary.append(("Loading", LOADING_METHOD_LABELS[shipment.loading_method]))
-    total = shipment.total_containers
+    # Summed from the queried rows, not the relationship property, so the
+    # stated total cannot disagree with the table printed directly above it.
+    total = sum((c.container_count for c in containers), Decimal("0"))
     if total:
         summary.append(("Total containers", format_quantity(total)))
 
@@ -512,6 +532,18 @@ def build_document(
         )
 
     if quotation.tax_amount:
+        # What the tax was applied on top of. Stated only when there is both a
+        # charge and a tax, because with neither it repeats the subtotal line
+        # immediately above it. Derived by subtraction from the grand total
+        # rather than re-summed, so it cannot disagree with the total printed
+        # two rows down.
+        if visible_charges or hidden_total:
+            totals.append(
+                DocumentTotal(
+                    "Subtotal before tax",
+                    format_money(quotation.grand_total - quotation.tax_amount, currency),
+                )
+            )
         totals.append(
             DocumentTotal(
                 f"Tax ({format_quantity(quotation.tax_rate_pct)}%)",
@@ -525,6 +557,26 @@ def build_document(
             emphasis=True,
         )
     )
+
+    # Deposit and balance sit *after* the emphasised total and are derived from
+    # it, so they cannot be read as components of it. The portal PDF already
+    # stated the deposit and this document did not, which meant the internal
+    # copy and the customer's copy of the same quotation disagreed about what
+    # was payable on order.
+    deposit = deposit_amount(quotation.grand_total, quotation.deposit_pct)
+    if deposit:
+        totals.append(
+            DocumentTotal(
+                f"Deposit required ({format_quantity(quotation.deposit_pct)}%)",
+                format_money(deposit, currency),
+            )
+        )
+        totals.append(
+            DocumentTotal(
+                "Balance due",
+                format_money(quotation.grand_total - deposit, currency),
+            )
+        )
 
     terms = [
         DocumentTerm(title=t.title, body=t.body_text)

@@ -220,11 +220,10 @@ def price(
         tax_rate_pct=quotation.tax_rate_pct or ZERO,
     )
 
+    from modules.calculation_engine import deposit_amount
+
     deposit_pct = quotation.deposit_pct or ZERO
-    deposit = (
-        q_money(totals.grand_total * deposit_pct / Decimal("100"))
-        if deposit_pct else Decimal("0.00")
-    )
+    deposit = deposit_amount(totals.grand_total, deposit_pct)
 
     return PricingSnapshot(
         scope=scope,

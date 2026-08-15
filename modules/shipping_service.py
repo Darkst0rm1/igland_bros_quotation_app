@@ -169,7 +169,14 @@ def ensure_shipment(
     """Fetch the quotation's shipment, creating it on first use.
 
     Defaults follow the reference price list: FOB, 40' high-cube dry
-    containers, floor loaded, freight included.
+    containers, floor loaded, and freight charged to the customer.
+
+    ``freight_method`` and ``show_on_document`` are deliberately **not** passed.
+    This constructor used to name ``FreightMethod.INCLUDED`` explicitly, which
+    meant the column default on the model was dead: every shipment the
+    application ever created took the value from this line, and changing the
+    model would have changed nothing anyone could see. The default belongs in
+    one place, and it is the model.
     """
     require(user, Perm.SHIPMENT_EDIT)
     require_edit_quotation(user, quotation)
@@ -184,7 +191,6 @@ def ensure_shipment(
         incoterm_place=settings_service.default_incoterm_place(session),
         origin_country=settings_service.default_origin_country(session),
         port_of_loading=settings_service.default_port_of_loading(session),
-        freight_method=FreightMethod.INCLUDED,
         freight_currency=quotation.currency,
         loading_method=settings_service.default_loading_method(session),
         created_by_id=user.id,
@@ -909,18 +915,19 @@ def sync_freight(
     # in the same session does not include rows written since. Reading it here
     # silently under-counted the freight — the third container row added to a
     # shipment was omitted from the total.
+    rows = session.execute(
+        select(
+            ShipmentContainer.freight_cost,
+            ShipmentContainer.container_count,
+        ).where(ShipmentContainer.quotation_shipment_id == shipment.id)
+    ).all()
     total = sum(
-        (
-            q_money(to_decimal(freight) * to_decimal(count))
-            for freight, count in session.execute(
-                select(
-                    ShipmentContainer.freight_cost,
-                    ShipmentContainer.container_count,
-                ).where(ShipmentContainer.quotation_shipment_id == shipment.id)
-            ).all()
-        ),
+        (q_money(to_decimal(freight) * to_decimal(count)) for freight, count in rows),
         ZERO,
     )
+    # Counted from the same queried rows as the money, so the charge's label
+    # and its amount cannot describe different shipments.
+    container_count = sum((to_decimal(count) for _, count in rows), ZERO)
     previous_total = shipment.total_freight
     shipment.total_freight = total
     session.flush()
@@ -928,7 +935,7 @@ def sync_freight(
     charge = _derived_charge(session, quotation.id)
 
     if shipment.freight_method is FreightMethod.ADDED_SEPARATELY and total > ZERO:
-        description = _freight_description(shipment)
+        description = _freight_description(shipment, container_count)
         if charge is None:
             charge = QuotationCharge(
                 quotation_id=quotation.id,
@@ -977,13 +984,31 @@ def sync_freight(
     return charge
 
 
-def _freight_description(shipment: QuotationShipment) -> str:
+def _freight_description(
+    shipment: QuotationShipment, container_count: Decimal
+) -> str:
+    """The customer-visible label on the freight charge.
+
+    ``container_count`` is passed in rather than read from
+    ``shipment.total_containers``, which sums the relationship. That was
+    described here as "fine, the description is cosmetic" and it is not: the
+    label sits beside the money on the customer's quotation, and a collection
+    loaded before the second container was written produced "Ocean freight —
+    1 container ... $8,800.00" on a two-container shipment. The caller has
+    already queried the rows to compute the total; it counts them there.
+    """
+    from modules.utilities import format_quantity
+
     bits = ["Ocean freight"]
     if shipment.port_of_loading and shipment.port_of_discharge:
         bits.append(f"{shipment.port_of_loading} to {shipment.port_of_discharge}")
-    count = shipment.total_containers
-    if count:  # relationship is fine here — description is cosmetic
-        bits.append(f"{count:g} container(s)")
+    if container_count:
+        # format_quantity, not ":g". Decimal keeps its trailing zeros under
+        # "g", so a single container printed on a customer document as
+        # "1.000 container(s)". utilities.format_quantity exists for exactly
+        # this and also avoids the "1E+3" that normalize() produces.
+        unit = "container" if container_count == 1 else "containers"
+        bits.append(f"{format_quantity(container_count)} {unit}")
     return " — ".join(bits)
 
 

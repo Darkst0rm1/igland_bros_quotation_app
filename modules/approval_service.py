@@ -179,13 +179,26 @@ def requires_approval(
 # --------------------------------------------------------------------------- #
 
 def submit(
-    session: Session, quotation: Quotation, user: AuthUser, note: str | None = None
+    session: Session,
+    quotation: Quotation,
+    user: AuthUser,
+    note: str | None = None,
+    *,
+    acknowledged_freight: bool = False,
 ) -> Approval | None:
     """Submit for approval, or approve outright when no rule fires.
 
     Returns the ``Approval`` when one was raised, or ``None`` when the
     quotation went straight to Approved because the submitter had authority for
     everything on it.
+
+    ``acknowledged_freight`` is required when the freight configuration is one
+    of the two that reads wrong — freight recorded but not billed, or billed
+    but not shown. Neither is invalid, so neither is refused outright; both are
+    easy to arrive at without deciding, so the submitter has to say they meant
+    it. The acknowledgement is recorded in the audit trail, because "who
+    approved sending a quotation $8,800 light" is a question that gets asked
+    afterwards, not before.
     """
     require(user, Perm.QUOTE_SUBMIT_FOR_APPROVAL)
 
@@ -199,6 +212,25 @@ def submit(
     problems = validate_for_submission(session, quotation)
     if problems:
         raise ApprovalError("The quotation is not complete: " + "; ".join(problems))
+
+    from modules import freight_policy
+
+    freight_warnings = freight_policy.warnings_for(session, quotation)
+    if freight_warnings and not acknowledged_freight:
+        raise ApprovalError(
+            "The freight configuration needs confirming before this can be "
+            "submitted: "
+            + " ".join(w.message for w in freight_warnings)
+        )
+    if freight_warnings:
+        record_audit(
+            session, user, AuditAction.QUOTATION_EDITED, EntityType.QUOTATION,
+            quotation.id,
+            reason=(
+                "freight configuration acknowledged at submission: "
+                + "; ".join(w.code for w in freight_warnings)
+            ),
+        )
 
     triggered = evaluate(session, quotation, user)
 

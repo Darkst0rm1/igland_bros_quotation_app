@@ -489,11 +489,9 @@ def compute_selection_totals(
 
 def deposit_due(quotation: Quotation, totals: QuotationTotals) -> Decimal:
     """Deposit as money, derived from the rate so it cannot drift."""
-    if not quotation.deposit_pct:
-        return Decimal("0.00")
-    from modules.calculation_engine import q_money
+    from modules.calculation_engine import deposit_amount
 
-    return q_money(totals.grand_total * quotation.deposit_pct / Decimal("100"))
+    return deposit_amount(totals.grand_total, quotation.deposit_pct)
 
 
 # --------------------------------------------------------------------------- #

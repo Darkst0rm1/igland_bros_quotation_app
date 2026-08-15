@@ -355,6 +355,25 @@ def compute_totals(
 
 
 # --------------------------------------------------------------------------- #
+# Deposit
+# --------------------------------------------------------------------------- #
+
+def deposit_amount(grand_total: Decimal, deposit_pct: Decimal | None) -> Decimal:
+    """``Grand Total x deposit rate``, to 2 dp. Balance is the remainder.
+
+    The deposit is stored as a rate and the money derived, so it cannot drift
+    out of step when the total moves — which it does whenever freight changes.
+    One implementation, because three surfaces state this figure (the internal
+    document, the customer portal and its PDF) and three copies of a formula
+    that references the grand total is three chances for one of them to miss a
+    charge.
+    """
+    if not deposit_pct:
+        return Decimal("0.00")
+    return q_money(to_decimal(grand_total) * to_decimal(deposit_pct) / HUNDRED)
+
+
+# --------------------------------------------------------------------------- #
 # Margin
 # --------------------------------------------------------------------------- #
 

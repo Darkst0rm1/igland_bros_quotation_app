@@ -21,6 +21,7 @@ from modules import (
     approval_service,
     document_service,
     portal_readiness,
+    freight_policy,
     portal_service,
     pricing_service,
     pricing_snapshot,
@@ -38,6 +39,7 @@ from modules.constants import (
     CONTAINER_SIZE_LABELS,
     CONTAINER_TYPE_LABELS,
     FREIGHT_METHOD_LABELS,
+    FREIGHT_METHOD_SHORT_LABELS,
     LOADING_METHOD_LABELS,
     STATUS_DISPLAY_NAMES,
     SUPPORTED_CURRENCIES,
@@ -926,8 +928,8 @@ with shipping_tab:
         summary_a, summary_b, summary_c = st.columns(3)
         summary_a.metric("Containers", format_quantity(total_container_count))
         summary_b.metric(
-            "Freight method",
-            FREIGHT_METHOD_LABELS[shipment["freight_method"]].split(" (")[0],
+            "Freight treatment",
+            FREIGHT_METHOD_SHORT_LABELS[shipment["freight_method"]],
         )
         if can_see_freight:
             summary_c.metric(
@@ -944,29 +946,30 @@ with shipping_tab:
         # so freight could be entered, totalled, displayed in a headline metric
         # and still be absent from the quotation with nothing on screen saying
         # so. A number that changes no total has to announce that itself.
-        if can_see_freight and shipment["total_freight"] > 0:
-            freight_shown = format_money(
-                shipment["total_freight"], shipment["freight_currency"]
-            )
-            if shipment["freight_method"] is FreightMethod.ADDED_SEPARATELY:
-                st.success(
-                    f"{freight_shown} is on the quotation as a single freight "
-                    f"charge, maintained from the container rows."
+        #
+        # The rules live in freight_policy because approval_service refuses a
+        # submission on the same two conditions. Two copies would let the page
+        # stop warning about something that still blocks, or warn about
+        # something that does not.
+        if can_see_freight:
+            with session_scope() as db:
+                freight_warnings = freight_policy.warnings_for(
+                    db, db.get(Quotation, quotation_id)
                 )
-            else:
+            for warning in freight_warnings:
                 st.warning(
-                    f"**This freight is not on the quotation.** {freight_shown} is "
-                    f"recorded against the shipment only, because the freight "
-                    f"method is *"
-                    f"{FREIGHT_METHOD_LABELS[shipment['freight_method']]}*. To "
-                    f"bill it, change that to *"
-                    f"{FREIGHT_METHOD_LABELS[FreightMethod.ADDED_SEPARATELY]}* "
-                    f"under **Route and freight** below."
+                    warning.message
                     + (
                         "" if editable else
-                        " This quotation is no longer editable, so that change "
+                        " This quotation is no longer editable, so changing it "
                         "needs a revision."
                     )
+                )
+            if not freight_warnings and shipment["total_freight"] > 0:
+                st.success(
+                    f"{format_money(shipment['total_freight'], shipment['freight_currency'])}"
+                    f" is on the quotation as a single freight charge and the "
+                    f"shipping details are on the customer document."
                 )
 
     if container_rows:
@@ -1237,6 +1240,29 @@ with shipping_tab:
         st.markdown("##### Route and freight")
 
         with st.form("shipment_details"):
+            # Who pays the freight decides the customer's total, so it opens
+            # the form at full width rather than sitting fourth in a column of
+            # ports. It was the least prominent control on the tab and the only
+            # one that changed what the customer owes.
+            freight_method = st.radio(
+                "Freight treatment",
+                list(FreightMethod),
+                index=list(FreightMethod).index(shipment["freight_method"]),
+                format_func=lambda m: FREIGHT_METHOD_LABELS[m],
+                disabled=not can_edit_freight,
+                horizontal=False,
+                help=(
+                    None if can_edit_freight
+                    else "Editing freight requires the shipment.edit_freight "
+                         "permission."
+                ),
+            )
+            st.caption(
+                "Only **Add freight separately to quotation** puts freight on "
+                "the customer's total. The other two record it for margin and "
+                "landed cost without charging for it."
+            )
+
             route_a, route_b = st.columns(2)
             with route_a:
                 incoterm = st.selectbox(
@@ -1271,12 +1297,6 @@ with shipping_tab:
                 final_destination = st.text_input(
                     "Final destination", value=shipment["final_destination"]
                 )
-                freight_method = st.selectbox(
-                    "Freight method", list(FreightMethod),
-                    index=list(FreightMethod).index(shipment["freight_method"]),
-                    format_func=lambda m: FREIGHT_METHOD_LABELS[m],
-                    disabled=not can_edit_freight,
-                )
 
             shipping_notes = st.text_area(
                 "Shipping notes", value=shipment["shipping_notes"]
@@ -1284,8 +1304,12 @@ with shipping_tab:
             doc_a, doc_b = st.columns(2)
             with doc_a:
                 show_on_document = st.checkbox(
-                    "Show shipping details on the customer document",
+                    "Show shipping details on customer document",
                     value=shipment["show_on_document"],
+                    help=(
+                        "On by default. A customer being charged freight is "
+                        "entitled to see the containers it is for."
+                    ),
                 )
             with doc_b:
                 visible_freight = st.checkbox(
@@ -1623,12 +1647,34 @@ with review_tab:
                 "Everything on this quotation is within your authority, so submitting "
                 "will approve it directly."
             )
+        # The freight configuration, restated here because this is the last
+        # screen before it goes anywhere. approval_service refuses the
+        # submission on the same conditions, so an operator who never opened
+        # the Shipping tab still cannot send a quotation whose freight is
+        # recorded and not billed without saying they meant it.
+        with session_scope() as db:
+            submit_freight_warnings = freight_policy.warnings_for(
+                db, db.get(Quotation, quotation_id)
+            )
+        acknowledged_freight = True
+        if submit_freight_warnings:
+            for warning in submit_freight_warnings:
+                st.warning(warning.message)
+            acknowledged_freight = st.checkbox(
+                "I have checked the freight treatment and it is correct",
+                key="acknowledge_freight",
+            )
+
         submit_note = st.text_area("Note for the approver (optional)", key="submit_note")
-        if st.button("Submit for approval", type="primary", disabled=bool(problems)):
+        if st.button(
+            "Submit for approval", type="primary",
+            disabled=bool(problems) or not acknowledged_freight,
+        ):
             try:
                 with session_scope() as db:
                     approval_service.submit(
-                        db, db.get(Quotation, quotation_id), user, submit_note or None
+                        db, db.get(Quotation, quotation_id), user, submit_note or None,
+                        acknowledged_freight=acknowledged_freight,
                     )
             except (ApprovalError, QuotationError, PermissionDenied) as exc:
                 st.error(str(exc))

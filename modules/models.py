@@ -1835,8 +1835,16 @@ class QuotationShipment(Base, TimestampMixin):
     port_of_discharge: Mapped[str | None] = mapped_column(String(160))
     final_destination: Mapped[str | None] = mapped_column(String(160))
 
+    #: Ocean freight is normally charged to the customer, so that is the
+    #: default. It used to be INCLUDED, which meant a shipment created through
+    #: the page recorded freight, totalled it and billed none of it — the
+    #: quotation went out light and nothing on screen said so.
+    #:
+    #: A Python-side default, deliberately: it applies when a *new* row is
+    #: constructed and touches nothing already stored, so no accepted or
+    #: approved quotation changes value because this line did.
     freight_method: Mapped[FreightMethod] = mapped_column(
-        _enum(FreightMethod), nullable=False, default=FreightMethod.INCLUDED
+        _enum(FreightMethod), nullable=False, default=FreightMethod.ADDED_SEPARATELY
     )
     #: Sum of the container rows' freight. Maintained by shipping_service.
     total_freight: Mapped[Decimal] = mapped_column(
@@ -1848,10 +1856,12 @@ class QuotationShipment(Base, TimestampMixin):
     loading_method: Mapped[LoadingMethod | None] = mapped_column(_enum(LoadingMethod))
     shipping_notes: Mapped[str | None] = mapped_column(Text)
 
-    #: The document section is opt-in per quotation, so existing quotations and
-    #: anyone who does not want it produce byte-identical output.
+    #: A customer being charged freight is entitled to see what they are being
+    #: charged for, so the section is on by default. Python-side, like the
+    #: method above: stored rows keep whatever they were saved with, and a
+    #: quotation that has already gone out does not gain a section.
     show_on_document: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False
+        Boolean, nullable=False, default=True
     )
     customer_visible_freight: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False

@@ -383,32 +383,32 @@ class TestFreight:
     def test_freight_per_container(self, session, shipped):
         assert shipping_service.freight_per_container(session, shipped.id) == D("2766.67")
 
-    def test_a_new_shipment_bills_nothing_until_the_method_is_changed(
+    def test_a_new_shipment_charges_the_customer_for_freight(
         self, session, shipped
     ):
         """The path a real quotation actually takes, which nothing else covers.
 
         Every other test in this class sets the freight method by hand before
         asserting, so none of them observes what a shipment created through the
-        page does: it takes the model default, ``INCLUDED``, and bills nothing.
-        Freight is entered, totalled and displayed, and the grand total does not
-        move — correct by design, and invisible unless the page says so.
+        page does. That blind spot hid a live defect: the default was
+        ``INCLUDED``, so freight was recorded, totalled and billed at nothing,
+        and a quotation went out $8,800 light with nothing on screen saying so.
 
-        The default was put to the business on 2026-08-15, with the argument
-        for changing it — ``settings_service.total_fob_cost`` says the $700 per
-        container inside the price is "distinct from the ocean freight quoted
-        to a customer" — and ``INCLUDED`` was kept deliberately. So it stays,
-        and the Shipping tab now warns whenever freight is recorded that the
-        quotation is not billing, which is what was actually missing.
+        Changed to ``ADDED_SEPARATELY`` on 2026-08-15 at the business's
+        instruction: ocean freight is normally charged, and
+        ``settings_service.total_fob_cost`` is explicit that the $700 a
+        container inside the selling price is "distinct from the ocean freight
+        quoted to a customer".
 
         Pinned here so the default is a decision somebody made rather than one
         nobody noticed. Changing it should break this test and be argued for.
         """
         shipment = shipping_service.get_shipment(session, shipped.id)
-        assert shipment.freight_method is FreightMethod.INCLUDED
+        assert shipment.freight_method is FreightMethod.ADDED_SEPARATELY
+        assert shipment.show_on_document is True
         assert shipment.total_freight == D("8300.00")
-        assert self._charges(session, shipped.id) == []
-        assert shipped.grand_total == shipped.subtotal
+        assert len(self._charges(session, shipped.id)) == 1
+        assert shipped.grand_total == shipped.subtotal + D("8300.00")
 
     def test_included_freight_creates_no_charge(self, session, admin, shipped):
         shipping_service.update_shipment(
@@ -554,11 +554,17 @@ class TestFreightPermissions:
             )
 
     def test_sales_may_not_change_the_freight_method(self, session, sales, quotation):
+        """INCLUDED, because the permission fires only on a real change.
+
+        ADDED_SEPARATELY is the default since 2026-08-15, so asking for it is a
+        no-op and correctly needs no permission — which made this test pass for
+        the wrong reason until the value moved off the default.
+        """
         quotation.sales_user_id = sales.id
         session.commit()
         with pytest.raises(PermissionDenied):
             shipping_service.update_shipment(
-                session, sales, quotation, freight_method=FreightMethod.ADDED_SEPARATELY
+                session, sales, quotation, freight_method=FreightMethod.INCLUDED
             )
 
     def test_a_manager_may_do_both(self, session, manager, quotation, carrier):
@@ -569,10 +575,12 @@ class TestFreightPermissions:
             freight_cost=D("3200"),
         )
         shipping_service.update_shipment(
-            session, manager, quotation, freight_method=FreightMethod.ADDED_SEPARATELY
+            session, manager, quotation, freight_method=FreightMethod.INCLUDED
         )
         session.commit()
-        assert shipping_service.get_shipment(session, quotation.id).total_freight == D("3200.00")
+        shipment = shipping_service.get_shipment(session, quotation.id)
+        assert shipment.total_freight == D("3200.00")
+        assert shipment.freight_method is FreightMethod.INCLUDED
 
     def test_reading_freight_needs_the_permission(self, session, sales, quotation):
         with pytest.raises(PermissionDenied):
@@ -850,19 +858,25 @@ class TestDocuments:
         session.commit()
         return quotation
 
-    def test_the_section_is_absent_unless_enabled(self, session, shipped):
-        model = document_model.build_document(session, shipped)
-        assert model.shipping is None
+    def test_the_section_is_present_by_default(self, session, shipped):
+        """Opt-out since 2026-08-15, not opt-in.
 
-    def test_enabling_it_adds_the_table(self, session, admin, shipped):
+        A customer charged for freight is entitled to see the containers it is
+        for, and the section being off by default meant the common case had to
+        be remembered.
+        """
+        model = document_model.build_document(session, shipped)
+        assert model.shipping is not None
+        assert model.shipping.rows[0][1] == "40 ft High Cube"
+
+    def test_turning_it_off_removes_the_table(self, session, admin, shipped):
         shipping_service.update_shipment(
-            session, admin, shipped, show_on_document=True
+            session, admin, shipped, show_on_document=False
         )
         session.commit()
 
         model = document_model.build_document(session, shipped)
-        assert model.shipping is not None
-        assert model.shipping.rows[0][1] == "40 ft High Cube"
+        assert model.shipping is None
 
     def test_internal_freight_never_reaches_the_document(
         self, session, admin, shipped

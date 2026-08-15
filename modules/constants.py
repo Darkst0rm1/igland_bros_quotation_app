@@ -465,10 +465,20 @@ class FreightMethod(StrEnum):
     INTERNAL_ONLY = "INTERNAL_ONLY"
 
 
+#: Worded from the customer's invoice outwards rather than from the data model,
+#: because the operator choosing between them is deciding who pays, not naming
+#: an enum. "Added as a separate charge" did not say *added to what*.
 FREIGHT_METHOD_LABELS: dict[FreightMethod, str] = {
-    FreightMethod.INCLUDED: "Freight included in the price",
-    FreightMethod.ADDED_SEPARATELY: "Freight added as a separate charge",
-    FreightMethod.INTERNAL_ONLY: "Freight internal only (margin and landed cost)",
+    FreightMethod.ADDED_SEPARATELY: "Add freight separately to quotation",
+    FreightMethod.INCLUDED: "Freight included in product price",
+    FreightMethod.INTERNAL_ONLY: "Customer arranges freight / no freight charge",
+}
+
+#: For metrics and table cells, where the full sentence does not fit.
+FREIGHT_METHOD_SHORT_LABELS: dict[FreightMethod, str] = {
+    FreightMethod.ADDED_SEPARATELY: "Charged separately",
+    FreightMethod.INCLUDED: "In the product price",
+    FreightMethod.INTERNAL_ONLY: "Customer arranges",
 }
 
 #: Marks the single quotation charge derived from a shipment. Reconciled to at
