@@ -574,7 +574,36 @@ class TestDefaults:
         shipment = shipping_service.get_shipment(session, quotation.id)
         assert shipment.freight_method is FreightMethod.ADDED_SEPARATELY
         assert shipment.show_on_document is True
+        assert shipment.customer_visible_freight is True
         assert len(_freight_charges(session, quotation.id)) == 1
+
+    def test_the_freight_column_is_on_the_document_by_default(
+        self, session, admin, quotation, carrier
+    ):
+        """A customer billed $8,800 can see it is two containers at $4,400."""
+        from modules import document_model
+
+        _add_freight(session, admin, quotation, carrier, "4400", count="2")
+        doc = document_model.build_document(session, quotation)
+        assert "freight" in doc.shipping.columns
+        assert "Freight" in doc.shipping.headings
+        assert any("$4,400.00" in cell for row in doc.shipping.rows for cell in row)
+
+    def test_the_column_can_still_be_turned_off(
+        self, session, admin, quotation, carrier
+    ):
+        """The flag stays authoritative; only its default moved."""
+        from modules import document_model
+
+        _add_freight(session, admin, quotation, carrier, "4400")
+        shipping_service.update_shipment(
+            session, admin, quotation, customer_visible_freight=False
+        )
+        session.commit()
+        doc = document_model.build_document(session, quotation)
+        assert "freight" not in doc.shipping.columns
+        # The charge in the totals is unaffected: that is what is being billed.
+        assert any("4,400.00" in t.amount for t in doc.totals)
 
     def test_the_model_default_is_the_one_that_applies(self, session):
         """``ensure_shipment`` used to name INCLUDED, making the model dead.
@@ -596,6 +625,9 @@ class TestDefaults:
             is FreightMethod.ADDED_SEPARATELY
         )
         assert QuotationShipment.__table__.c.show_on_document.default.arg is True
+        assert (
+            QuotationShipment.__table__.c.customer_visible_freight.default.arg is True
+        )
 
     def test_two_containers_at_4400_come_to_8800(
         self, session, admin, quotation, carrier

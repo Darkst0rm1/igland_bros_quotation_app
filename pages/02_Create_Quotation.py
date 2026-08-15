@@ -1313,11 +1313,13 @@ with shipping_tab:
                 )
             with doc_b:
                 visible_freight = st.checkbox(
-                    "Show freight cost on the document",
+                    "Show freight per container on the document",
                     value=shipment["customer_visible_freight"],
                     help=(
-                        "Off by default. Internal freight never appears on a customer "
-                        "document unless this is ticked."
+                        "On by default, so a customer billed for freight can see "
+                        "what it is per container. Untick it where the freight "
+                        "is inside the price and you would rather not itemise "
+                        "how much of that price it is."
                     ),
                 )
             saved_shipment = st.form_submit_button("Save shipping details", type="primary")

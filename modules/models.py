@@ -1863,8 +1863,18 @@ class QuotationShipment(Base, TimestampMixin):
     show_on_document: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True
     )
+    #: The per-container freight column in the shipping table. On by default
+    #: since 2026-08-15, alongside the section itself: a customer being billed
+    #: $8,800 of freight is entitled to see it is two containers at $4,400.
+    #:
+    #: Worth knowing what this shows on a quotation whose freight is *not*
+    #: charged. Under INCLUDED the figure is a component of the price rather
+    #: than a charge, so ticking it there itemises how much of what they pay is
+    #: freight. That is a disclosure, not a leak — no cost or margin is in this
+    #: number — but it is a choice, and the flag stays authoritative so the
+    #: operator makes it.
     customer_visible_freight: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False
+        Boolean, nullable=False, default=True
     )
 
     created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
