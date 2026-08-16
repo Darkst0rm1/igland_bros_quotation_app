@@ -54,12 +54,19 @@ from modules.constants import (
     LoadingMethod,
     Perm,
     PortalResponseType,
+    PriceTierCode,
     PricingBasis,
     QuotationStatus,
     SendMethod,
 )
 from modules.database import session_scope
-from modules.models import CustomerResponseLog, Product, Quotation, TermTemplate
+from modules.models import (
+    CustomerResponseLog,
+    Product,
+    Quotation,
+    QuotationItem,
+    TermTemplate,
+)
 from modules.quotation_service import QuotationError
 from modules.revision_service import RevisionError
 from modules.shipping_service import ShippingError
@@ -532,27 +539,269 @@ with detail_tab:
 # Lines
 # --------------------------------------------------------------------------- #
 
+#: The lines table is drawn as columns rather than ``st.dataframe`` because a
+#: dataframe cannot hold a button, and the actions belong on the row they act
+#: on. Widths are relative; the last one holds three compact icon buttons.
+_LINE_COLUMN_WIDTHS = [0.5, 1.6, 2.2, 1.3, 0.8, 1.0, 0.8, 1.2, 0.8, 1.3, 1.5]
+_LINE_COLUMN_LABELS = [
+    "#", "Size", "Board quality", "Tier", "Basis", "Packs", "Ctnrs",
+    "Price/pack", "Disc %", "Net", "Actions",
+]
+
+
+@st.dialog("Edit line", width="large")
+def _edit_line_dialog(line_id: int) -> None:
+    """Change one line, over the page it was clicked from.
+
+    Every figure is read from the database on open rather than from the page's
+    ``lines`` snapshot, so a dialog opened after someone else changed the line
+    edits what is actually stored.
+
+    Product and board quality are shown but not editable: ``update_line``
+    refuses anything outside its allow-list and there is no service that
+    re-points a line at a different variant. Offering the control anyway would
+    mean either writing the column here — bypassing the repricing, the
+    warnings and the audit entry that ``add_line`` performs — or silently
+    ignoring the operator. Changing the product means removing the line and
+    adding it, which is one click each and leaves an honest trail.
+    """
+    with session_scope() as db:
+        item = db.get(QuotationItem, line_id)
+        if item is None or item.quotation_id != quotation_id:
+            st.error("That line is no longer part of this quotation.")
+            return
+        current = {
+            "line_no": item.line_no,
+            "size_label": item.size_label or "",
+            "board_quality": item.board_quality or "",
+            "case_pack": item.case_pack or 0,
+            "tier_code": item.tier.code if item.tier else "",
+            "pricing_basis": item.pricing_basis,
+            "quantity_packs": float(item.quantity_packs),
+            "container_count": float(item.container_count),
+            "line_discount_pct": float(item.line_discount_pct),
+            "price_per_pack": item.price_per_pack,
+            "is_custom_price": item.is_custom_price,
+            "custom_price_reason": item.custom_price_reason or "",
+            "description_override": item.description_override or "",
+            "customer_remarks": item.customer_remarks or "",
+        }
+
+    st.caption(
+        f"Line {current['line_no']} · **{current['size_label']}** · "
+        f"{current['board_quality']} · case {current['case_pack']}"
+    )
+    st.caption(
+        "To quote a different product or board quality, delete this line and "
+        "add it again — the price has to be resolved from the catalogue."
+    )
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        packs = st.number_input(
+            "Quantity (packs)", min_value=0.0, step=50.0,
+            value=current["quantity_packs"], key=f"dlg_packs_{line_id}",
+        )
+        containers = st.number_input(
+            "Containers", min_value=0.0, step=1.0,
+            value=current["container_count"], key=f"dlg_ctnrs_{line_id}",
+            help=(
+                "Leave at zero and the document works it out from the "
+                "quantity. A figure here is your own statement of the "
+                "shipment and overrides that everywhere."
+            ),
+        )
+        discount = st.number_input(
+            "Line discount %", min_value=0.0, max_value=100.0, step=0.5,
+            value=current["line_discount_pct"], key=f"dlg_disc_{line_id}",
+        )
+    with col_b:
+        tier_codes = [c for c, _ in tiers]
+        tier_code = st.selectbox(
+            "Pricing tier", tier_codes,
+            index=(
+                tier_codes.index(current["tier_code"])
+                if current["tier_code"] in tier_codes else 0
+            ),
+            format_func=lambda code: next(n for c, n in tiers if c == code),
+            key=f"dlg_tier_{line_id}",
+        )
+        basis = st.radio(
+            "Pricing basis", list(PricingBasis),
+            index=list(PricingBasis).index(current["pricing_basis"]),
+            format_func=lambda b: "Per pack" if b is PricingBasis.PACK else "Per piece",
+            horizontal=True, key=f"dlg_basis_{line_id}",
+        )
+
+    custom_price = None
+    custom_reason = ""
+    if tier_code == PriceTierCode.CUSTOM.value:
+        price_col, reason_col = st.columns(2)
+        with price_col:
+            custom_price = st.number_input(
+                "Custom price per pack", min_value=0.0, step=0.01, format="%.4f",
+                value=float(current["price_per_pack"]),
+                key=f"dlg_price_{line_id}",
+            )
+        with reason_col:
+            custom_reason = st.text_input(
+                "Reason for the custom price",
+                value=current["custom_price_reason"],
+                key=f"dlg_reason_{line_id}",
+                help="Recorded against the line and shown to the approver.",
+            )
+
+    description = st.text_input(
+        "Description shown to the customer",
+        value=current["description_override"], key=f"dlg_desc_{line_id}",
+    )
+    remarks = st.text_input(
+        "Customer remarks", value=current["customer_remarks"],
+        key=f"dlg_remarks_{line_id}",
+    )
+
+    save_col, cancel_col = st.columns(2)
+    with save_col:
+        save = st.button("Save changes", type="primary", width="stretch",
+                         key=f"dlg_save_{line_id}")
+    with cancel_col:
+        cancel = st.button("Cancel", width="stretch", key=f"dlg_cancel_{line_id}")
+
+    if cancel:
+        st.rerun()
+
+    if save:
+        try:
+            with session_scope() as db:
+                quote = db.get(Quotation, quotation_id)
+                quotation_service.update_line(
+                    db, user, quote, line_id,
+                    quantity_packs=Decimal(str(packs)),
+                    container_count=Decimal(str(containers)),
+                    line_discount_pct=Decimal(str(discount)),
+                    pricing_basis=basis,
+                    description_override=description or None,
+                    customer_remarks=remarks or None,
+                )
+                # Tier last: it re-resolves the price, and doing it after the
+                # quantity means the repricing sees the quantity being saved.
+                repricing = (
+                    tier_code != current["tier_code"]
+                    or tier_code == PriceTierCode.CUSTOM.value
+                )
+                if repricing:
+                    quotation_service.change_line_tier(
+                        db, user, quote, line_id, tier_code,
+                        custom_price_per_pack=(
+                            Decimal(str(custom_price))
+                            if custom_price is not None else None
+                        ),
+                        custom_price_reason=custom_reason or None,
+                    )
+        except (QuotationError, PermissionDenied) as exc:
+            # Inside the dialog, without closing it: the operator keeps what
+            # they typed and can correct it.
+            st.error(str(exc))
+        else:
+            st.session_state["line_toast"] = "Line saved"
+            st.rerun()
+
+
 with lines_tab:
     if lines:
-        table = [
-            {
-                "#": ln["line_no"],
-                "Size": ln["size_label"],
-                "Board quality": ln["board_quality"],
-                "Tier": ln["tier"] + (" *" if ln["is_custom_price"] else ""),
-                "Basis": "Pack" if ln["pricing_basis"] is PricingBasis.PACK else "Piece",
-                "Packs": format_quantity(ln["quantity_packs"]),
-                "Pieces": format_quantity(ln["quantity_pieces"]),
-                "Ctnrs": format_quantity(ln["container_count"]),
-                "Price/pack": format_pack_price(ln["price_per_pack"], ccy),
-                "Disc %": f"{ln['line_discount_pct']:.2f}",
-                "Net": format_money(ln["net_line_total"], ccy),
-            }
-            for ln in lines
-        ]
-        st.dataframe(table, width="stretch", hide_index=True)
+        if st.session_state.pop("line_toast", None):
+            st.toast("Line saved", icon="✅")
+
+        # Not ``header``: that name holds the quotation's own header dict for
+        # the rest of the page, and shadowing it here made the Details tab read
+        # a list of columns as a mapping several hundred lines further down.
+        header_cells = st.columns(_LINE_COLUMN_WIDTHS, vertical_alignment="center")
+        for col, label in zip(header_cells, _LINE_COLUMN_LABELS):
+            col.markdown(
+                f"<span style='font-size:0.78rem;color:#8b949e;"
+                f"text-transform:uppercase;letter-spacing:.04em'>{label}</span>",
+                unsafe_allow_html=True,
+            )
+        st.divider()
+
+        for ln in lines:
+            cells = st.columns(_LINE_COLUMN_WIDTHS, vertical_alignment="center")
+            cells[0].write(ln["line_no"])
+            cells[1].write(ln["size_label"])
+            cells[2].write(ln["board_quality"])
+            cells[3].write(ln["tier"] + (" \\*" if ln["is_custom_price"] else ""))
+            cells[4].write(
+                "Pack" if ln["pricing_basis"] is PricingBasis.PACK else "Piece"
+            )
+            cells[5].write(format_quantity(ln["quantity_packs"]))
+            cells[6].write(format_quantity(ln["container_count"]))
+            cells[7].write(format_pack_price(ln["price_per_pack"], ccy))
+            cells[8].write(f"{ln['line_discount_pct']:.2f}")
+            cells[9].write(format_money(ln["net_line_total"], ccy))
+
+            with cells[10]:
+                if editable:
+                    edit_col, dup_col, del_col = st.columns(3)
+                    if edit_col.button(
+                        "✏️", key=f"edit_{ln['id']}", help="Edit this line",
+                        width="stretch",
+                    ):
+                        _edit_line_dialog(ln["id"])
+                    if dup_col.button(
+                        "⧉", key=f"dup_{ln['id']}", help="Duplicate this line",
+                        width="stretch",
+                    ):
+                        with session_scope() as db:
+                            quotation_service.duplicate_line(
+                                db, user, db.get(Quotation, quotation_id), ln["id"]
+                            )
+                        st.rerun()
+                    # No confirmation, by request. The guard against a double
+                    # click is that the second one finds the line gone and
+                    # remove_line raises rather than deleting its neighbour —
+                    # line ids are passed explicitly, never row positions.
+                    if del_col.button(
+                        "🗑", key=f"del_{ln['id']}", help="Delete this line",
+                        width="stretch",
+                    ):
+                        try:
+                            with session_scope() as db:
+                                quotation_service.remove_line(
+                                    db, user, db.get(Quotation, quotation_id),
+                                    ln["id"],
+                                )
+                        except (QuotationError, PermissionDenied) as exc:
+                            st.error(str(exc))
+                        else:
+                            st.rerun()
+                else:
+                    st.caption("—")
+
+        st.divider()
         if any(ln["is_custom_price"] for ln in lines):
             st.caption("\\* custom price — requires approval before the document is released.")
+
+        if editable and len(lines) > 1:
+            bulk_col, _ = st.columns([2, 3])
+            with bulk_col:
+                apply_tier = st.selectbox(
+                    "Re-price every line at",
+                    ["-", *[c for c, _ in tiers]],
+                    format_func=lambda code: (
+                        "Apply a tier to all lines…" if code == "-"
+                        else next(n for c, n in tiers if c == code)
+                    ),
+                    label_visibility="collapsed",
+                    key="apply_tier_all",
+                )
+                if apply_tier != "-" and st.button("Apply to all lines"):
+                    with session_scope() as db:
+                        issues = quotation_service.apply_tier_to_all(
+                            db, user, db.get(Quotation, quotation_id), apply_tier
+                        )
+                    for issue in issues:
+                        st.warning(issue)
+                    st.rerun()
     else:
         st.info("No lines yet. Add a product below.")
 
@@ -787,110 +1036,6 @@ with lines_tab:
                 else:
                     st.toast("Line added", icon="✅")
                     st.rerun()
-
-    if lines and editable:
-        st.divider()
-        st.markdown("##### Change a line")
-        edit_line = st.selectbox(
-            "Line",
-            lines,
-            format_func=lambda ln: f"{ln['line_no']}. {ln['size_label']} — {ln['tier']}",
-            key="edit_line_pick",
-        )
-
-        edit_a, edit_b, edit_c = st.columns(3)
-        with edit_a:
-            new_packs = st.number_input(
-                "Quantity (packs)",
-                min_value=0.0, step=50.0,
-                value=float(edit_line["quantity_packs"]),
-                key="edit_packs",
-            )
-            new_containers = st.number_input(
-                "Containers", min_value=0.0, step=1.0,
-                value=float(edit_line["container_count"]), key="edit_containers",
-                help=(
-                    "Leave at zero and the document works it out from the "
-                    "quantity. A figure here is your own statement of the "
-                    "shipment and overrides that everywhere."
-                ),
-            )
-        with edit_b:
-            new_discount = st.number_input(
-                "Line discount %", min_value=0.0, max_value=100.0, step=0.5,
-                value=float(edit_line["line_discount_pct"]), key="edit_discount",
-            )
-            new_tier = st.selectbox(
-                "Re-price at tier",
-                [c for c, _ in tiers],
-                index=[c for c, _ in tiers].index(edit_line["tier_code"])
-                if edit_line["tier_code"] in [c for c, _ in tiers] else 0,
-                format_func=lambda code: next(n for c, n in tiers if c == code),
-                key="edit_tier",
-            )
-        with edit_c:
-            new_description = st.text_input(
-                "Description shown to the customer",
-                value=edit_line["description_override"], key="edit_description",
-            )
-            new_remarks = st.text_input(
-                "Customer remarks", value=edit_line["customer_remarks"], key="edit_remarks"
-            )
-
-        action_a, action_b, action_c, action_d = st.columns(4)
-        with action_a:
-            if st.button("Save line", type="primary"):
-                try:
-                    with session_scope() as db:
-                        quote = db.get(Quotation, quotation_id)
-                        quotation_service.update_line(
-                            db, user, quote, edit_line["id"],
-                            quantity_packs=Decimal(str(new_packs)),
-                            container_count=Decimal(str(new_containers)),
-                            line_discount_pct=Decimal(str(new_discount)),
-                            description_override=new_description or None,
-                            customer_remarks=new_remarks or None,
-                        )
-                        if new_tier != edit_line["tier_code"]:
-                            quotation_service.change_line_tier(
-                                db, user, quote, edit_line["id"], new_tier
-                            )
-                except (QuotationError, PermissionDenied) as exc:
-                    st.error(str(exc))
-                else:
-                    st.toast("Line saved", icon="✅")
-                    st.rerun()
-        with action_b:
-            if st.button("Duplicate"):
-                with session_scope() as db:
-                    quotation_service.duplicate_line(
-                        db, user, db.get(Quotation, quotation_id), edit_line["id"]
-                    )
-                st.rerun()
-        with action_c:
-            if st.button("Remove"):
-                with session_scope() as db:
-                    quotation_service.remove_line(
-                        db, user, db.get(Quotation, quotation_id), edit_line["id"]
-                    )
-                st.rerun()
-        with action_d:
-            apply_tier = st.selectbox(
-                "Apply tier to all",
-                ["-", *[c for c, _ in tiers]],
-                format_func=lambda code: (
-                    "-" if code == "-" else next(n for c, n in tiers if c == code)
-                ),
-                label_visibility="collapsed",
-            )
-            if apply_tier != "-" and st.button("Apply to all lines"):
-                with session_scope() as db:
-                    issues = quotation_service.apply_tier_to_all(
-                        db, user, db.get(Quotation, quotation_id), apply_tier
-                    )
-                for issue in issues:
-                    st.warning(issue)
-                st.rerun()
 
 
 
@@ -1301,27 +1446,16 @@ with shipping_tab:
             shipping_notes = st.text_area(
                 "Shipping notes", value=shipment["shipping_notes"]
             )
-            doc_a, doc_b = st.columns(2)
-            with doc_a:
-                show_on_document = st.checkbox(
-                    "Show shipping details on customer document",
-                    value=shipment["show_on_document"],
-                    help=(
-                        "On by default. A customer being charged freight is "
-                        "entitled to see the containers it is for."
-                    ),
-                )
-            with doc_b:
-                visible_freight = st.checkbox(
-                    "Show freight per container on the document",
-                    value=shipment["customer_visible_freight"],
-                    help=(
-                        "On by default, so a customer billed for freight can see "
-                        "what it is per container. Untick it where the freight "
-                        "is inside the price and you would rather not itemise "
-                        "how much of that price it is."
-                    ),
-                )
+            show_on_document = st.checkbox(
+                "Show shipping summary on customer document",
+                value=shipment["show_on_document"],
+                help=(
+                    "On by default. Prints the incoterms, country of origin, "
+                    "loading method and container count as one line. The "
+                    "per-container table was removed — what the customer is "
+                    "charged for freight is the line in the totals."
+                ),
+            )
             saved_shipment = st.form_submit_button("Save shipping details", type="primary")
 
         if saved_shipment:
@@ -1336,7 +1470,6 @@ with shipping_tab:
                     "loading_method": loading_method,
                     "shipping_notes": shipping_notes or None,
                     "show_on_document": show_on_document,
-                    "customer_visible_freight": visible_freight,
                 }
                 if can_edit_freight:
                     changes["freight_method"] = freight_method

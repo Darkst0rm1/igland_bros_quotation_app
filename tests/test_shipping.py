@@ -858,18 +858,19 @@ class TestDocuments:
         session.commit()
         return quotation
 
-    def test_the_section_is_present_by_default(self, session, shipped):
+    def test_the_summary_is_present_by_default(self, session, shipped):
         """Opt-out since 2026-08-15, not opt-in.
 
-        A customer charged for freight is entitled to see the containers it is
-        for, and the section being off by default meant the common case had to
-        be remembered.
+        What appears is a summary — incoterms, origin, loading, container
+        count. The per-container table was removed on 2026-08-16.
         """
         model = document_model.build_document(session, shipped)
         assert model.shipping is not None
-        assert model.shipping.rows[0][1] == "40 ft High Cube"
+        labels = dict(model.shipping.summary)
+        assert labels["Total containers"] == "2"
+        assert "Incoterms" in labels
 
-    def test_turning_it_off_removes_the_table(self, session, admin, shipped):
+    def test_turning_it_off_removes_the_summary(self, session, admin, shipped):
         shipping_service.update_shipment(
             session, admin, shipped, show_on_document=False
         )
@@ -878,42 +879,57 @@ class TestDocuments:
         model = document_model.build_document(session, shipped)
         assert model.shipping is None
 
-    def test_internal_freight_never_reaches_the_document(
+    def test_no_per_container_table_reaches_either_renderer(
         self, session, admin, shipped
     ):
+        """The table is gone from the model, so neither renderer can print it.
+
+        Asserted against the produced files rather than the model, because the
+        point is what a customer receives. The container size was the most
+        distinctive cell in the old table and is the marker for its absence.
+        """
+        from docx import Document as DocxDocument
         from pypdf import PdfReader
 
-        shipping_service.update_shipment(
-            session, admin, shipped, show_on_document=True,
-            customer_visible_freight=False,
-        )
-        session.commit()
-
         model = document_model.build_document(session, shipped)
-        assert "freight" not in model.shipping.columns
-        assert "6,400" not in repr(model)
+        assert not hasattr(model.shipping, "rows")
+        assert not hasattr(model.shipping, "columns")
 
-        text = PdfReader(BytesIO(pdf_generator.render(model))).pages[0].extract_text()
-        assert "6,400" not in text
-        assert "40 ft High Cube" in text
-
-        from docx import Document as DocxDocument
+        text = "\n".join(
+            p.extract_text() or ""
+            for p in PdfReader(BytesIO(pdf_generator.render(model))).pages
+        )
+        assert "40 ft High Cube" not in text
+        assert "Shipping & container details" not in text
+        assert "Port of discharge" not in text
+        # The summary that replaced it survives.
+        assert "Total containers" in text
 
         document = DocxDocument(BytesIO(docx_generator.render(model)))
+        body = " ".join(p.text for p in document.paragraphs)
         cells = " ".join(
             c.text for t in document.tables for r in t.rows for c in r.cells
         )
-        assert "6,400" not in cells
-        assert "40 ft High Cube" in cells
+        assert "40 ft High Cube" not in cells and "40 ft High Cube" not in body
+        assert "Total containers" in body
 
-    def test_freight_appears_only_when_marked_visible(self, session, admin, shipped):
+    def test_internal_freight_never_reaches_the_document(
+        self, session, admin, shipped
+    ):
+        """Stronger now: there is nowhere in the shipping section for it to go."""
+        from pypdf import PdfReader
+
         shipping_service.update_shipment(
             session, admin, shipped, show_on_document=True,
             customer_visible_freight=True,
         )
         session.commit()
+
         model = document_model.build_document(session, shipped)
-        assert "freight" in model.shipping.columns
+        assert "6,400" not in repr(model)
+
+        text = PdfReader(BytesIO(pdf_generator.render(model))).pages[0].extract_text()
+        assert "6,400" not in text, "internal freight reached the document"
 
     def test_a_quotation_without_shipping_is_unaffected(
         self, session, admin, quotation

@@ -434,6 +434,46 @@ class TestQuotationPages:
         assert any("QT-2026-0001" in t.value for t in app.title)
         assert any(m.value == "$7,420.00" for m in app.metric)
 
+    def test_the_lines_tab_offers_per_row_actions(self, session, priced_quotation):
+        """Edit and delete sit on the row, not in a form below the table.
+
+        The button labels are the assertion because the buttons are what the
+        operator clicks; ``st.dataframe`` cannot hold one, which is why the
+        table is drawn as columns.
+        """
+        app = self._run_page(
+            "pages/02_Create_Quotation.py",
+            session,
+            priced_quotation["admin_row"],
+            active_quotation_id=priced_quotation["quotation_id"],
+        )
+        assert not app.exception, app.exception
+        labels = [b.label for b in app.button]
+        assert "✏️" in labels, "no edit button on the line"
+        assert "🗑" in labels, "no delete button on the line"
+        assert "Actions" in _text(app)
+
+    def test_the_change_a_line_section_is_gone(self, session, priced_quotation):
+        """Removed from the interface, not hidden.
+
+        Editing is only through the row's own button now, so a second editor
+        further down the page would be two ways to do one thing — and the one
+        people found first was the one that made them scroll.
+        """
+        app = self._run_page(
+            "pages/02_Create_Quotation.py",
+            session,
+            priced_quotation["admin_row"],
+            active_quotation_id=priced_quotation["quotation_id"],
+        )
+        assert not app.exception, app.exception
+        text = _text(app)
+        assert "Change a line" not in text
+        assert "Re-price at tier" not in text
+        assert "Save line" not in [b.label for b in app.button]
+        # Adding a product is untouched.
+        assert "Add a product" in text
+
     def test_history_lists_the_quotation(self, session, priced_quotation):
         app = self._run_page(
             "pages/03_Quotation_History.py", session, priced_quotation["admin_row"]

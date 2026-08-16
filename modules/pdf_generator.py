@@ -292,51 +292,23 @@ def _line_table(model: QuotationDocument, styles, width: float):  # noqa: ANN001
 
 
 def _shipping_flowables(model: QuotationDocument, styles, width: float) -> list:  # noqa: ANN001
-    """The optional Shipping & Container Details section."""
+    """The shipping summary: incoterms, origin, loading, container count.
+
+    No table. The per-container breakdown was removed on 2026-08-16 — it
+    listed shipping line, size, type, quantity, ports, transit and freight for
+    every container, spilled onto a second page on a two-container shipment,
+    and told the customer nothing the line items and the freight charge in the
+    totals do not. What remains is one grey line of trade terms, which is why
+    the section heading went with the table: a heading over a single sentence
+    is furniture.
+    """
+    del width  # the summary is a paragraph; it needs no column arithmetic
+
     shipping = model.shipping
-    if shipping is None:
+    if not shipping:
         return []
 
-    numeric = set(shipping.numeric_indexes)
-    header = [
-        Paragraph(_escape(h), styles["head_right"] if i in numeric else styles["head"])
-        for i, h in enumerate(shipping.headings)
-    ]
-    body = [
-        [
-            Paragraph(
-                _escape(cell),
-                styles["cell_right"] if i in numeric else styles["cell"],
-            )
-            for i, cell in enumerate(row)
-        ]
-        for row in shipping.rows
-    ]
-
-    table = LongTable(
-        [header, *body],
-        colWidths=[width / len(shipping.columns)] * len(shipping.columns),
-        repeatRows=1,
-        splitByRow=True,
-    )
-    table.setStyle(
-        TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), BAND),
-            ("LINEBELOW", (0, 0), (-1, 0), 0.6, RULE),
-            ("LINEBELOW", (0, 1), (-1, -1), 0.25, RULE),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("TOPPADDING", (0, 0), (-1, -1), 8),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-            ("LEFTPADDING", (0, 0), (-1, -1), 7),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 7),
-        ])
-    )
-
-    flowables: list = [
-        Paragraph("Shipping &amp; container details", styles["section"]),
-        table,
-        Spacer(1, 6),
-    ]
+    flowables: list = []
 
     if shipping.summary:
         summary_text = "  ·  ".join(

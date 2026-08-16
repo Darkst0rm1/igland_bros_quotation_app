@@ -268,40 +268,16 @@ def _write_totals(doc: Document, model: QuotationDocument) -> None:
 
 
 def _write_shipping(doc: Document, model: QuotationDocument) -> None:
-    """The optional Shipping & Container Details section."""
+    """The shipping summary. No per-container table — see ``pdf_generator``.
+
+    Both renderers consume the same model, so the table disappearing from one
+    and not the other is not possible: ``DocumentShipping`` no longer carries
+    rows for either to print.
+    """
     shipping = model.shipping
-    if shipping is None:
+    if not shipping:
         return
 
-    _para(doc, "Shipping & container details", size=11, bold=True, space_after=4)
-
-    numeric = set(shipping.numeric_indexes)
-    table = doc.add_table(rows=1, cols=len(shipping.columns))
-    table.style = "Table Grid"
-    table.alignment = WD_TABLE_ALIGNMENT.CENTER
-
-    header_row = table.rows[0]
-    _repeat_header(header_row)
-    for index, heading in enumerate(shipping.headings):
-        cell = header_row.cells[index]
-        _shade(cell, BAND)
-        _para(
-            cell, heading, size=7.5, bold=True,
-            align=WD_ALIGN_PARAGRAPH.RIGHT if index in numeric else None,
-            space_after=0,
-        )
-
-    for row in shipping.rows:
-        new_row = table.add_row()
-        _keep_row_together(new_row)
-        for index, value in enumerate(row):
-            _para(
-                new_row.cells[index], value, size=8,
-                align=WD_ALIGN_PARAGRAPH.RIGHT if index in numeric else None,
-                space_after=0,
-            )
-
-    _para(doc, "", size=4)
     if shipping.summary:
         _para(
             doc,

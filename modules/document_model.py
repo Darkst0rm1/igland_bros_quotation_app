@@ -125,24 +125,29 @@ class DocumentTerm:
 class DocumentShipping:
     """The customer-facing view of the shipping arrangement.
 
-    Freight cost appears **only** when the shipment is explicitly marked
-    customer-visible. There is no field for internal freight, so no renderer
-    can print it by accident.
+    A **summary**, not a table. The per-container breakdown — shipping line,
+    size, type, quantity, ports, transit, freight — was removed on 2026-08-16:
+    it ran to a second page on a two-container shipment, and every figure a
+    customer needs is already on the quotation. What they are charged is the
+    freight line in the totals; what they are shipping is the line items.
+
+    Freight cost therefore appears **only** in the totals, as a charge. There
+    is no field for internal freight here, so no renderer can print it by
+    accident.
     """
 
-    columns: list[str]
-    headings: list[str]
-    rows: list[list[str]]
     summary: list[tuple[str, str]] = field(default_factory=list)
     notes: str = ""
     freight_statement: str = ""
 
-    @property
-    def numeric_indexes(self) -> list[int]:
-        return [
-            i for i, key in enumerate(self.columns)
-            if key in {"quantity", "transit", "freight"}
-        ]
+    def __bool__(self) -> bool:
+        """Empty when there is nothing left to say.
+
+        The renderers ask ``if shipping`` rather than ``is not None`` so a
+        shipment with no incoterm, no note and no freight statement prints no
+        stray blank line.
+        """
+        return bool(self.summary or self.notes or self.freight_statement)
 
 
 @dataclass(frozen=True)
@@ -204,38 +209,27 @@ class QuotationDocument:
 # Building
 # --------------------------------------------------------------------------- #
 
-#: Columns for the shipping table. Freight is included only when the shipment
-#: says the customer may see it.
-SHIPPING_COLUMNS: dict[str, str] = {
-    "carrier": "Shipping line",
-    "size": "Container size",
-    "type": "Container type",
-    "quantity": "Quantity",
-    "loading": "Port of loading",
-    "discharge": "Port of discharge",
-    "transit": "Transit time",
-    "freight": "Freight",
-}
-
-
 def _build_shipping(session: Session, quotation: Quotation) -> DocumentShipping | None:
-    """The shipping section, or ``None`` when it should not appear.
+    """The shipping summary, or ``None`` when it should not appear.
 
-    On by default per quotation. Anything not filled in is dropped from the
-    table rather than printed empty, so a partly-completed shipment still reads
-    cleanly.
+    On by default per quotation. Anything not filled in is omitted rather than
+    printed empty, so a partly-completed shipment still reads cleanly.
 
-    Containers are **queried**, not read off ``shipment.containers``. The
-    session factory sets ``expire_on_commit=False``, so a collection loaded
-    before a container was written stays stale for the rest of the session —
-    and the two places that generate a document most often are the page that
-    has just added one and ``create_revision``, which has just copied them all.
-    Rendering QT-2026-0012's revision printed a freight line reading "2
-    containers" above a table listing one, from a session that had loaded the
-    collection while it was empty. ``shipping_service`` already queries for
-    exactly this reason; this did not.
+    There is no per-container table any more. It listed the shipping line,
+    size, type, quantity, ports, transit and freight for every container, ran
+    onto a second page on a two-container shipment, and repeated what the
+    quotation already says: the freight charge is in the totals and the goods
+    are the line items. Removed 2026-08-16.
+
+    Containers are still **queried** rather than read off
+    ``shipment.containers`` for the total. The session factory sets
+    ``expire_on_commit=False``, so a collection loaded before a container was
+    written stays stale for the rest of the session — and the two callers that
+    render most often are the page that has just added one and
+    ``create_revision``, which has just copied them all. That produced a
+    freight line reading "2 containers" above a stated total of one.
     """
-    from modules.constants import FREIGHT_METHOD_LABELS, FreightMethod
+    from modules.constants import FreightMethod
     from modules.models import ShipmentContainer
 
     shipment = quotation.shipment
@@ -252,36 +246,6 @@ def _build_shipping(session: Session, quotation: Quotation) -> DocumentShipping 
     if not containers:
         return None
 
-    show_freight = shipment.customer_visible_freight
-    wanted = ["carrier", "size", "type", "quantity"]
-    if any(c.port_of_loading for c in containers) or shipment.port_of_loading:
-        wanted.append("loading")
-    if any(c.port_of_discharge for c in containers) or shipment.port_of_discharge:
-        wanted.append("discharge")
-    if any(c.transit_days for c in containers):
-        wanted.append("transit")
-    if show_freight:
-        wanted.append("freight")
-
-    rows: list[list[str]] = []
-    for container in containers:
-        values = {
-            "carrier": container.carrier_name,
-            "size": container.size_label,
-            "type": container.type_label,
-            "quantity": format_quantity(container.container_count),
-            "loading": container.port_of_loading or shipment.port_of_loading or "",
-            "discharge": container.port_of_discharge or shipment.port_of_discharge or "",
-            "transit": (
-                f"{container.transit_days} days" if container.transit_days else ""
-            ),
-            "freight": (
-                format_money(container.freight_cost, shipment.freight_currency)
-                if show_freight else ""
-            ),
-        }
-        rows.append([values[key] for key in wanted])
-
     summary: list[tuple[str, str]] = []
     if shipment.incoterm:
         place = f" {shipment.incoterm_place}" if shipment.incoterm_place else ""
@@ -294,8 +258,9 @@ def _build_shipping(session: Session, quotation: Quotation) -> DocumentShipping 
         from modules.constants import LOADING_METHOD_LABELS
 
         summary.append(("Loading", LOADING_METHOD_LABELS[shipment.loading_method]))
-    # Summed from the queried rows, not the relationship property, so the
-    # stated total cannot disagree with the table printed directly above it.
+    # Summed from the queried rows rather than the relationship property, so
+    # the stated total cannot disagree with the freight charge in the totals,
+    # which counts the same rows.
     total = sum((c.container_count for c in containers), Decimal("0"))
     if total:
         summary.append(("Total containers", format_quantity(total)))
@@ -311,14 +276,12 @@ def _build_shipping(session: Session, quotation: Quotation) -> DocumentShipping 
             "Freight is quoted separately and appears in the totals above."
         )
 
-    return DocumentShipping(
-        columns=wanted,
-        headings=[SHIPPING_COLUMNS[key] for key in wanted],
-        rows=rows,
+    shipping = DocumentShipping(
         summary=summary,
         notes=shipment.shipping_notes or "",
         freight_statement=freight_statement,
     )
+    return shipping or None
 
 
 def _column_set(session: Session) -> list[str]:

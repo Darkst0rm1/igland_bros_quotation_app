@@ -385,12 +385,13 @@ class TestTheDocument:
     def test_every_container_reaches_the_table_in_the_session_that_added_them(
         self, session, admin, quotation, carrier
     ):
-        """The freight line and the table have to agree on how many there are.
+        """The freight line and the stated total must agree on how many.
 
         ``expire_on_commit`` is off, so ``shipment.containers`` loaded once
         stays stale. Building the document in the same session that added the
         containers — which is what the page and ``create_revision`` both do —
-        printed "Ocean freight — 2 containers" above a table listing one.
+        printed "Ocean freight — 2 containers" against a section counting one.
+        Both figures are now summed from queried rows.
         """
         from modules import document_model
 
@@ -410,13 +411,12 @@ class TestTheDocument:
 
         doc = document_model.build_document(session, quotation)
         assert doc.shipping is not None
-        assert len(doc.shipping.rows) == 2, (
-            "the table lost a container the freight line still counts"
-        )
         freight_row = next(t for t in doc.totals if "freight" in t.label.lower())
         assert "2 containers" in freight_row.label
         assert freight_row.amount == "$8,800.00"
-        assert ("Total containers", "2") in doc.shipping.summary
+        assert ("Total containers", "2") in doc.shipping.summary, (
+            "the summary lost a container the freight line still counts"
+        )
 
     def test_a_quotation_without_freight_prints_no_freight_row(
         self, session, quotation
@@ -577,33 +577,40 @@ class TestDefaults:
         assert shipment.customer_visible_freight is True
         assert len(_freight_charges(session, quotation.id)) == 1
 
-    def test_the_freight_column_is_on_the_document_by_default(
+    def test_customer_visible_freight_no_longer_changes_the_document(
         self, session, admin, quotation, carrier
     ):
-        """A customer billed $8,800 can see it is two containers at $4,400."""
+        """It controlled the per-container column, which no longer exists.
+
+        The column was removed on 2026-08-16 with the rest of the table, so
+        this flag became inert and its checkbox came off the Shipping tab.
+        Asserted so nobody re-adds a control for a setting that does nothing —
+        the freight a customer sees is the charge in the totals, and that is
+        governed by the freight method, not by this.
+        """
         from modules import document_model
 
         _add_freight(session, admin, quotation, carrier, "4400", count="2")
-        doc = document_model.build_document(session, quotation)
-        assert "freight" in doc.shipping.columns
-        assert "Freight" in doc.shipping.headings
-        assert any("$4,400.00" in cell for row in doc.shipping.rows for cell in row)
 
-    def test_the_column_can_still_be_turned_off(
-        self, session, admin, quotation, carrier
-    ):
-        """The flag stays authoritative; only its default moved."""
-        from modules import document_model
+        shipping_service.update_shipment(
+            session, admin, quotation, customer_visible_freight=True
+        )
+        session.commit()
+        with_flag = document_model.build_document(session, quotation)
 
-        _add_freight(session, admin, quotation, carrier, "4400")
         shipping_service.update_shipment(
             session, admin, quotation, customer_visible_freight=False
         )
         session.commit()
-        doc = document_model.build_document(session, quotation)
-        assert "freight" not in doc.shipping.columns
-        # The charge in the totals is unaffected: that is what is being billed.
-        assert any("4,400.00" in t.amount for t in doc.totals)
+        without_flag = document_model.build_document(session, quotation)
+
+        assert with_flag.shipping == without_flag.shipping
+        # And in both cases the money is on the quotation exactly once.
+        for doc in (with_flag, without_flag):
+            assert sum(
+                1 for t in doc.totals if "freight" in t.label.lower()
+            ) == 1
+            assert any("8,800.00" in t.amount for t in doc.totals)
 
     def test_the_model_default_is_the_one_that_applies(self, session):
         """``ensure_shipment`` used to name INCLUDED, making the model dead.
