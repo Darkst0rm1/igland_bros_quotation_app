@@ -115,6 +115,48 @@ class TestProjectionSafety:
         assert isinstance(view.lines[0].unit_price, D)
         assert isinstance(view.lines[0].line_total, D)
 
+    def test_a_waived_charge_is_marked_and_not_counted(self, session, sent, link):
+        """The customer sees the concession, and does not pay for it.
+
+        Both halves matter: dropping the row would hide that the charge
+        applied, and leaving it in the total would bill for something the
+        quotation says was waived.
+        """
+        from modules.constants import ChargeType
+        from modules.models import QuotationCharge
+
+        token, _ = link
+        before = portal_service.compute_selection_totals(sent, [])
+
+        # Written directly rather than through add_charge: this fixture's
+        # quotation has been issued and sent, so the service correctly refuses
+        # to edit it. What is under test is the projection, not the writer.
+        session.add(
+            QuotationCharge(
+                quotation_id=sent.id, sort_order=99,
+                charge_type=ChargeType.CUTTING_DIES, description="Cutting Dies",
+                quantity_value=D("1"), rate=D("400"), amount=D("400.00"),
+                currency=sent.currency, is_waived=True,
+            )
+        )
+        session.commit()
+        # ``expire_on_commit`` is off and the "before" call above loaded
+        # ``sent.charges``, so the collection does not include the row just
+        # written until it is expired.
+        session.expire(sent)
+
+        after = portal_service.compute_selection_totals(sent, [])
+        view = projection.build_quote_view(sent, token, after)
+
+        dies = next(c for c in view.charges if c.label == "Cutting Dies")
+        assert dies.is_waived, "the customer is not told it was waived"
+        assert dies.amount == D("400.00"), "the original amount is not shown"
+        # Adding a waived charge moves no money at all.
+        assert after.charges_total == before.charges_total
+        assert after.grand_total == before.grand_total
+        assert after.charges_waived == D("400.00")
+        assert view.totals.charges == before.charges_customer_visible
+
     def test_database_ids_are_not_published(self, session, sent, link):
         token, _ = link
         totals = portal_service.compute_selection_totals(sent, [])

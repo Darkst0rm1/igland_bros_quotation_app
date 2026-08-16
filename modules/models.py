@@ -37,6 +37,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy import false as sa_false
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
@@ -949,8 +950,22 @@ class QuotationCharge(Base, TimestampMixin):
     is_customer_visible: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True
     )
+    #: Waived: shown at its full ``amount`` and contributing nothing.
+    #:
+    #: Deliberately not a discount and deliberately not a deletion. A discount
+    #: reduces what a thing costs and is negotiated; deleting the row loses the
+    #: fact that the charge applied at all. A waiver says "this would have been
+    #: $400, and we are not charging it" — the customer sees the concession,
+    #: and so does anyone reading the quotation back later.
+    #:
+    #: Nothing rewrites ``amount`` when this is set. Every surface reads the
+    #: original from there and asks this flag whether it counts, which is what
+    #: makes un-waiving exact rather than a re-entry of a remembered figure.
+    is_waived: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=sa_false()
+    )
     internal_note: Mapped[str | None] = mapped_column(Text)
-    #: 'manual' or 'plate_calculator'
+    #: 'manual', 'plate_calculator' or 'shipment'
     source: Mapped[str] = mapped_column(String(30), nullable=False, default="manual")
 
     quotation: Mapped[Quotation] = relationship(back_populates="charges")

@@ -271,8 +271,18 @@
           <dt>Discount</dt><dd>&minus;{{ quote.totals.discount | money(quote.currency) }}</dd>
         {% endif %}
         {% for charge in quote.charges %}
-          <dt>{{ charge.label }}</dt><dd>{{ charge.amount | money(quote.currency) }}</dd>
+          {% if charge.is_waived %}
+            <dt>{{ charge.label }} <span class="waived">WAIVED</span></dt>
+            <dd class="waived-amount">{{ charge.amount | money(quote.currency) }}</dd>
+          {% else %}
+            <dt>{{ charge.label }}</dt><dd>{{ charge.amount | money(quote.currency) }}</dd>
+          {% endif %}
         {% endfor %}
+        {% if quote.charges | selectattr("is_waived") | first %}
+          {# The rows above deliberately do not sum to this, so it is stated. #}
+          <dt>Total charges</dt>
+          <dd>{{ quote.totals.charges | money(quote.currency) }}</dd>
+        {% endif %}
         <dt>{{ quote.totals.tax_label }}</dt>
         <dd>{{ quote.totals.tax_amount | money(quote.currency) }}</dd>
       </dl>

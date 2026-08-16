@@ -135,6 +135,9 @@ class LineView:
 class ChargeView:
     label: str
     amount: Decimal
+    #: Shown at ``amount`` and contributing nothing. The customer sees the
+    #: concession rather than a charge that silently never appeared.
+    is_waived: bool = False
 
 
 @dataclass(frozen=True)
@@ -337,7 +340,8 @@ def build_quote_view(
 
     charges = tuple(
         ChargeView(label=(c.description or c.charge_type.value.replace("_", " ").title()),
-                   amount=c.amount)
+                   amount=c.amount,
+                   is_waived=c.is_waived)
         for c in sorted(quotation.charges, key=lambda c: c.sort_order)
         if c.is_customer_visible
     )

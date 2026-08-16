@@ -170,6 +170,21 @@ tr.not-included td { opacity: .62; }
 }
 .breakdown dt { color: var(--muted); }
 .breakdown dd { margin: 0; text-align: right; }
+
+/* A waived charge keeps its amount on the page and is struck through, so the
+   customer can see both what it would have been and that it is not payable.
+   The mark carries the meaning; the strike is only reinforcement, which is why
+   it is not the sole signal. */
+.waived {
+  font-size: .7rem;
+  font-weight: 700;
+  letter-spacing: .06em;
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+  vertical-align: middle;
+}
+.breakdown dd.waived-amount { text-decoration: line-through; opacity: .65; }
 .deposit { font-size: .9rem; padding-top: 12px; border-top: 1px solid var(--rule); }
 
 /* ----------------------------------------------------------------- forms - */

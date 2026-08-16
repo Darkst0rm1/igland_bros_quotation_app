@@ -250,15 +250,28 @@ class ChargeInput:
     exchange_rate: Decimal = Decimal("1")
     is_taxable: bool = True
     is_customer_visible: bool = True
+    #: Waived charges keep their amount and contribute nothing. See
+    #: ``QuotationCharge.is_waived`` for why that is not a discount.
+    is_waived: bool = False
 
 
 def charge_amount(charge: ChargeInput) -> Decimal:
-    """``quantity x rate x exchange_rate``, quantized to 2 dp."""
+    """``quantity x rate x exchange_rate``, quantized to 2 dp.
+
+    The charge's own value, whether or not it is being collected. A waiver
+    does not change what a thing costs, so it does not change this; what it
+    changes is whether :func:`compute_totals` counts it.
+    """
     return q_money(
         to_decimal(charge.quantity)
         * to_decimal(charge.rate)
         * to_decimal(charge.exchange_rate)
     )
+
+
+def payable_charge_amount(charge: ChargeInput) -> Decimal:
+    """What the customer is actually billed for this charge: nil if waived."""
+    return ZERO if charge.is_waived else charge_amount(charge)
 
 
 # --------------------------------------------------------------------------- #
@@ -269,8 +282,12 @@ def charge_amount(charge: ChargeInput) -> Decimal:
 class QuotationTotals:
     subtotal: Decimal
     quotation_discount: Decimal
+    #: Charges the customer pays. Waived charges are excluded.
     charges_total: Decimal
     charges_customer_visible: Decimal
+    #: What the waived charges would have come to. Reported so a surface can
+    #: state the concession, and so it is never inferred by subtraction.
+    charges_waived: Decimal
     taxable_base: Decimal
     tax_amount: Decimal
     grand_total: Decimal
@@ -303,6 +320,11 @@ def compute_totals(
     marking them non-taxable. Internal-only charges still count toward the
     grand total — they are costs the company incurs, hidden from the customer
     PDF but not from the quotation's own arithmetic.
+
+    A **waived** charge is the one thing that counts as nothing: it is excluded
+    from ``charges``, from ``taxable charges`` and therefore from the total,
+    while keeping its own amount for display. ``charges_waived`` reports what
+    was given away, so no caller has to derive it by subtraction.
     """
     charges = charges or []
 
@@ -314,12 +336,19 @@ def compute_totals(
         quote_discount = q_money(subtotal * to_decimal(quotation_discount_pct) / HUNDRED)
     quote_discount = min(quote_discount, subtotal) if subtotal >= ZERO else quote_discount
 
-    amounts = [(c, charge_amount(c)) for c in charges]
+    # Every figure below is the *payable* amount, so a waived charge counts as
+    # nil everywhere money is summed — the total, the tax base and the
+    # customer-visible figure alike. Its own amount is untouched and is what
+    # the surfaces print beside the WAIVED mark.
+    amounts = [(c, payable_charge_amount(c)) for c in charges]
     charges_total = sum((amt for _, amt in amounts), ZERO)
     charges_visible = sum(
         (amt for c, amt in amounts if c.is_customer_visible), ZERO
     )
     taxable_charges = sum((amt for c, amt in amounts if c.is_taxable), ZERO)
+    charges_waived = sum(
+        (charge_amount(c) for c in charges if c.is_waived), ZERO
+    )
 
     taxable_base = (subtotal - quote_discount) + taxable_charges
     tax = q_money(taxable_base * to_decimal(tax_rate_pct) / HUNDRED)
@@ -343,6 +372,7 @@ def compute_totals(
         quotation_discount=quote_discount,
         charges_total=charges_total,
         charges_customer_visible=charges_visible,
+        charges_waived=charges_waived,
         taxable_base=taxable_base,
         tax_amount=tax,
         grand_total=grand_total,

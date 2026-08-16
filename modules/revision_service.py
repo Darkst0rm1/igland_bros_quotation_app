@@ -568,6 +568,11 @@ def _copy_charge(charge: QuotationCharge, quotation_id: int) -> QuotationCharge:
         exchange_rate=charge.exchange_rate,
         is_taxable=charge.is_taxable,
         is_customer_visible=charge.is_customer_visible,
+        # A revision inherits the waiver. A concession already made to the
+        # customer does not quietly reappear as a charge because the quotation
+        # was reissued; taking it back is a decision, and the revision is
+        # editable so it can be made explicitly.
+        is_waived=charge.is_waived,
         internal_note=charge.internal_note,
         source=charge.source,
     )

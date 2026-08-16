@@ -225,6 +225,9 @@ with session_scope() as db:
         "subtotal": quotation.subtotal,
         "quote_discount_amount": quotation.quote_discount_amount,
         "charges_total": quotation.charges_total,
+        # From the engine, not summed here: this page must not be a second
+        # place money is added up, and pricing_snapshot already reports it.
+        "charges_waived": pricing_snapshot.base(quotation).charges_waived,
         "tax_amount": quotation.tax_amount,
         "grand_total": quotation.grand_total,
         "total_cost": quotation.total_cost,
@@ -266,8 +269,10 @@ with session_scope() as db:
             "amount": c.amount,
             "taxable": c.is_taxable,
             "visible": c.is_customer_visible,
+            "waived": c.is_waived,
+            "sort_order": c.sort_order,
         }
-        for c in quotation.charges
+        for c in sorted(quotation.charges, key=lambda c: c.sort_order)
     ]
     terms = [
         {
@@ -546,6 +551,14 @@ _LINE_COLUMN_WIDTHS = [0.5, 1.6, 2.2, 1.3, 0.8, 1.0, 0.8, 1.2, 0.8, 1.3, 1.5]
 _LINE_COLUMN_LABELS = [
     "#", "Size", "Board quality", "Tier", "Basis", "Packs", "Ctnrs",
     "Price/pack", "Disc %", "Net", "Actions",
+]
+
+#: The charges table, drawn the same way and for the same reason: the waive
+#: control has to sit on the charge it waives.
+_CHARGE_COLUMN_WIDTHS = [1.6, 2.4, 0.7, 1.1, 1.2, 0.8, 1.3, 1.1]
+_CHARGE_COLUMN_LABELS = [
+    "Type", "Description", "Qty", "Rate", "Amount", "Taxable",
+    "On document", "Waive",
 ]
 
 
@@ -1518,22 +1531,71 @@ with shipping_tab:
 
 with charges_tab:
     if charges:
-        st.dataframe(
-            [
-                {
-                    "Type": c["type"],
-                    "Description": c["description"],
-                    "Qty": format_quantity(c["quantity"]),
-                    "Rate": format_money(c["rate"], ccy),
-                    "Amount": format_money(c["amount"], ccy),
-                    "Taxable": "Yes" if c["taxable"] else "No",
-                    "On document": "Yes" if c["visible"] else "Internal only",
-                }
-                for c in charges
-            ],
-            width="stretch",
-            hide_index=True,
-        )
+        # Columns rather than a dataframe, for the same reason as the lines
+        # table: the waive control belongs on the charge it waives, and a
+        # dataframe cannot hold one.
+        charge_head = st.columns(_CHARGE_COLUMN_WIDTHS, vertical_alignment="center")
+        for col, label in zip(charge_head, _CHARGE_COLUMN_LABELS):
+            col.markdown(
+                f"<span style='font-size:0.78rem;color:#8b949e;"
+                f"text-transform:uppercase;letter-spacing:.04em'>{label}</span>",
+                unsafe_allow_html=True,
+            )
+        st.divider()
+
+        for c in charges:
+            cells = st.columns(_CHARGE_COLUMN_WIDTHS, vertical_alignment="center")
+            cells[0].write(c["type"])
+            cells[1].write(c["description"] or "—")
+            cells[2].write(format_quantity(c["quantity"]))
+            cells[3].write(format_money(c["rate"], ccy))
+            # The amount stays the amount. A waived charge is not worth less;
+            # it is simply not collected, and the strike says which.
+            cells[4].markdown(
+                f"~~{escape_markdown(format_money(c['amount'], ccy))}~~"
+                if c["waived"] else escape_markdown(format_money(c["amount"], ccy))
+            )
+            cells[5].write("Yes" if c["taxable"] else "No")
+            cells[6].write("Yes" if c["visible"] else "Internal only")
+            with cells[7]:
+                if editable:
+                    waived_now = st.checkbox(
+                        "Waived",
+                        value=c["waived"],
+                        key=f"waive_{c['id']}",
+                        help=(
+                            "Shown on the quotation at its full amount and "
+                            "billed at nothing. Not a discount, and not a "
+                            "deletion — the customer sees the concession."
+                        ),
+                    )
+                    if waived_now != c["waived"]:
+                        try:
+                            with session_scope() as db:
+                                quotation_service.set_charge_waived(
+                                    db, user, db.get(Quotation, quotation_id),
+                                    c["id"], waived_now,
+                                )
+                        except (QuotationError, PermissionDenied) as exc:
+                            st.error(str(exc))
+                        else:
+                            st.rerun()
+                elif c["waived"]:
+                    st.caption("WAIVED")
+                else:
+                    st.caption("—")
+
+        st.divider()
+        # Both figures come from the engine. The page states them; it does not
+        # work them out, which is what keeps one arithmetic path.
+        if header["charges_waived"]:
+            st.info(
+                escape_markdown(
+                    f"{format_money(header['charges_waived'], ccy)} waived. "
+                    f"Charges billed: "
+                    f"{format_money(header['charges_total'], ccy)}."
+                )
+            )
     else:
         st.info("No additional charges.")
 

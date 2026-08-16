@@ -307,13 +307,7 @@ def _totals(
     if snapshot.discount:
         rows.append(PdfTotal("Discount", -snapshot.discount))
 
-    for charge in sorted(quotation.charges, key=lambda c: c.sort_order):
-        if charge.is_customer_visible:
-            label = (
-                charge.description
-                or charge.charge_type.value.replace("_", " ").title()
-            )
-            rows.append(PdfTotal(label, charge.amount))
+    rows.extend(_charge_rows(quotation, snapshot.charges_customer_visible))
 
     if snapshot.tax_amount:
         rows.append(PdfTotal(_tax_label(snapshot.tax_rate_pct), snapshot.tax_amount))
@@ -475,6 +469,38 @@ def build_accepted(
     )
 
 
+def _charge_rows(quotation: Quotation, payable: Decimal) -> list[PdfTotal]:
+    """Customer-visible charges, with waived ones marked and not counted.
+
+    Shared by the live and the accepted document so the two cannot describe
+    the same charge differently — the accepted PDF is the one a customer keeps,
+    and a waiver that appeared on the quotation and not on it would be a
+    concession the record does not show.
+
+    ``payable`` is what the visible charges actually come to. It is printed
+    only when a waiver makes the rows above deliberately fail to add up.
+    """
+    from modules.document_model import WAIVED_MARK
+
+    rows: list[PdfTotal] = []
+    waived_any = False
+    for charge in sorted(quotation.charges, key=lambda c: c.sort_order):
+        if not charge.is_customer_visible:
+            continue
+        label = (
+            charge.description
+            or charge.charge_type.value.replace("_", " ").title()
+        )
+        if charge.is_waived:
+            waived_any = True
+            label = f"{label} — {WAIVED_MARK}"
+        rows.append(PdfTotal(label, charge.amount))
+
+    if waived_any:
+        rows.append(PdfTotal("Total charges", payable))
+    return rows
+
+
 def _accepted_totals(
     quotation: Quotation, response: PortalResponse, snapshot: PricingSnapshot
 ) -> tuple[PdfTotal, ...]:
@@ -491,15 +517,7 @@ def _accepted_totals(
 
     if snapshot.discount:
         rows.append(PdfTotal("Discount", -snapshot.discount))
-    for charge in sorted(quotation.charges, key=lambda c: c.sort_order):
-        if charge.is_customer_visible:
-            rows.append(
-                PdfTotal(
-                    charge.description
-                    or charge.charge_type.value.replace("_", " ").title(),
-                    charge.amount,
-                )
-            )
+    rows.extend(_charge_rows(quotation, snapshot.charges_customer_visible))
     if response.tax_amount:
         rows.append(PdfTotal(_tax_label(snapshot.tax_rate_pct), response.tax_amount))
 

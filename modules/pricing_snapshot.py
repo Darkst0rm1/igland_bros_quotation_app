@@ -93,6 +93,9 @@ class PricingSnapshot:
     discount: Decimal
     charges_total: Decimal
     charges_customer_visible: Decimal
+    #: What the waived charges would have come to. Carried so every surface
+    #: reports the concession from the same figure.
+    charges_waived: Decimal
     taxable_base: Decimal
     tax_rate_pct: Decimal
     tax_amount: Decimal
@@ -208,6 +211,7 @@ def price(
         ChargeInput(
             quantity=c.quantity_value, rate=c.rate, exchange_rate=c.exchange_rate,
             is_taxable=c.is_taxable, is_customer_visible=c.is_customer_visible,
+            is_waived=c.is_waived,
         )
         for c in sorted(quotation.charges, key=lambda c: c.sort_order)
     ]
@@ -233,6 +237,7 @@ def price(
         discount=totals.quotation_discount,
         charges_total=totals.charges_total,
         charges_customer_visible=totals.charges_customer_visible,
+        charges_waived=totals.charges_waived,
         taxable_base=totals.taxable_base,
         tax_rate_pct=quotation.tax_rate_pct or ZERO,
         tax_amount=totals.tax_amount,

@@ -691,6 +691,61 @@ def add_plate_charge(
     )
 
 
+def set_charge_waived(
+    session: Session,
+    user: AuthUser,
+    quotation: Quotation,
+    charge_id: int,
+    waived: bool,
+    reason: str | None = None,
+) -> QuotationCharge:
+    """Waive one charge, or take the waiver off it.
+
+    Works for every charge on the quotation whatever produced it — a hand-added
+    setup fee, the plate calculator's printing plates, the shipment's ocean
+    freight, and anything a later charge type adds — because the flag is on the
+    charge rather than on any of the things that create one. There is
+    deliberately no list of waivable types to keep in step.
+
+    The amount is not touched. Un-waiving therefore restores the exact figure
+    rather than one somebody re-entered, and a waived charge still reports what
+    it would have been.
+
+    Same permission as adding or removing a charge: whoever may put a charge on
+    a quotation may decide not to collect it. The reason, where given, is
+    recorded against the audit entry — "why was the customer not billed for
+    this" is asked long after the person who decided has moved on.
+    """
+    require_edit_quotation(user, quotation)
+
+    charge = session.get(QuotationCharge, charge_id)
+    if charge is None or charge.quotation_id != quotation.id:
+        raise QuotationError("That charge is not part of this quotation.")
+
+    was = charge.is_waived
+    charge.is_waived = bool(waived)
+    session.flush()
+    recompute_totals(session, quotation)
+
+    record_audit(
+        session, user, AuditAction.QUOTATION_EDITED, EntityType.QUOTATION_CHARGE,
+        charge.id,
+        old_value={"is_waived": was},
+        new_value={
+            "is_waived": charge.is_waived,
+            "charge_type": str(charge.charge_type),
+            "amount": charge.amount,
+        },
+        reason=reason,
+    )
+    log.info(
+        "%s charge %s on %s (%s)",
+        "Waived" if charge.is_waived else "Un-waived",
+        charge.id, quotation.quote_number, charge.amount,
+    )
+    return charge
+
+
 def remove_charge(
     session: Session, user: AuthUser, quotation: Quotation, charge_id: int
 ) -> None:
@@ -904,6 +959,7 @@ def recompute_totals(session: Session, quotation: Quotation) -> QuotationTotals:
             exchange_rate=c.exchange_rate,
             is_taxable=c.is_taxable,
             is_customer_visible=c.is_customer_visible,
+            is_waived=c.is_waived,
         )
         for c in charges
     ]

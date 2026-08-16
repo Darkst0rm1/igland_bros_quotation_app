@@ -477,6 +477,7 @@ def compute_selection_totals(
         quotation_discount=snapshot.discount,
         charges_total=snapshot.charges_total,
         charges_customer_visible=snapshot.charges_customer_visible,
+        charges_waived=snapshot.charges_waived,
         taxable_base=snapshot.taxable_base,
         tax_amount=snapshot.tax_amount,
         grand_total=snapshot.grand_total,

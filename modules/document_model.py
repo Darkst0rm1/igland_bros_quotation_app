@@ -209,6 +209,11 @@ class QuotationDocument:
 # Building
 # --------------------------------------------------------------------------- #
 
+#: How a waived charge is marked wherever it is shown. One constant, because
+#: the quotation, the portal and both renderers have to say the same word.
+WAIVED_MARK = "WAIVED"
+
+
 def _build_shipping(session: Session, quotation: Quotation) -> DocumentShipping | None:
     """The shipping summary, or ``None`` when it should not appear.
 
@@ -481,17 +486,45 @@ def build_document(
     # count toward the grand total, so they are folded into the customer-visible
     # figures rather than listed — the total the customer sees is the total they
     # will be invoiced.
-    visible_charges = [c for c in quotation.charges if c.is_customer_visible]
+    #
+    # A waived charge is listed at its full amount and marked, because the
+    # concession is the point: deleting the row would hide that the charge
+    # applied, and discounting it would misstate what it costs.
+    visible_charges = sorted(
+        (c for c in quotation.charges if c.is_customer_visible),
+        key=lambda c: c.sort_order,
+    )
     for charge in visible_charges:
         label = charge.description or str(charge.charge_type).replace("_", " ").title()
-        totals.append(DocumentTotal(label, format_money(charge.amount, currency)))
+        amount = format_money(charge.amount, currency)
+        totals.append(
+            DocumentTotal(
+                f"{label} — {WAIVED_MARK}" if charge.is_waived else label,
+                amount,
+            )
+        )
 
     hidden_total = sum(
-        (c.amount for c in quotation.charges if not c.is_customer_visible), Decimal("0")
+        (
+            c.amount for c in quotation.charges
+            if not c.is_customer_visible and not c.is_waived
+        ),
+        Decimal("0"),
     )
     if hidden_total:
         totals.append(
             DocumentTotal("Additional charges", format_money(hidden_total, currency))
+        )
+
+    # Stated only when something was waived. Without a waiver it repeats what
+    # the rows above already add up to; with one, the rows deliberately do not
+    # add up to it, and saying so is the difference between a clear concession
+    # and an arithmetic error the customer has to query.
+    if any(c.is_waived for c in quotation.charges):
+        totals.append(
+            DocumentTotal(
+                "Total charges", format_money(quotation.charges_total, currency)
+            )
         )
 
     if quotation.tax_amount:
