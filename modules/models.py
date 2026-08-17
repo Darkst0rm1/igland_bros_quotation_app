@@ -37,7 +37,6 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy import false as sa_false
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
@@ -52,6 +51,7 @@ from modules.constants import (
     LoadingMethod,
     ApprovalDecision,
     ChargeType,
+    WaiverStatus,
     CustomerResponse,
     CustomerStatus,
     DocumentJobStatus,
@@ -950,20 +950,54 @@ class QuotationCharge(Base, TimestampMixin):
     is_customer_visible: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True
     )
-    #: Waived: shown at its full ``amount`` and contributing nothing.
-    #:
-    #: Deliberately not a discount and deliberately not a deletion. A discount
-    #: reduces what a thing costs and is negotiated; deleting the row loses the
-    #: fact that the charge applied at all. A waiver says "this would have been
-    #: $400, and we are not charging it" — the customer sees the concession,
-    #: and so does anyone reading the quotation back later.
-    #:
-    #: Nothing rewrites ``amount`` when this is set. Every surface reads the
-    #: original from there and asks this flag whether it counts, which is what
-    #: makes un-waiving exact rather than a re-entry of a remembered figure.
-    is_waived: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default=sa_false()
+    # --- waiver ----------------------------------------------------------- #
+    #
+    # Waiving is deliberately not a discount and not a deletion. A discount
+    # reduces what a thing costs and is negotiated; deleting the row loses the
+    # fact that the charge applied at all. A waiver says "this would have been
+    # $400, and we are not charging it" — the customer sees the concession,
+    # and so does anyone reading the quotation back later.
+    #
+    # Nothing rewrites ``amount``. Every surface reads the original from there
+    # and asks the status whether it counts, which is what makes un-waiving
+    # exact rather than a re-entry of a remembered figure.
+    #
+    # It is a status rather than a boolean because giving money away needs a
+    # second person: an employee asks, a manager decides, and the charge is
+    # billed in full until it is decided.
+    waiver_status: Mapped[WaiverStatus] = mapped_column(
+        _enum(WaiverStatus), nullable=False, default=WaiverStatus.NONE,
+        server_default=WaiverStatus.NONE.value,
     )
+    #: Why it was asked for. Required to request, and to waive directly.
+    waiver_reason: Mapped[str | None] = mapped_column(Text)
+    waiver_requested_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    waiver_requested_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    #: Who approved or rejected it, and what they said.
+    waiver_decided_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    waiver_decided_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    waiver_decision_note: Mapped[str | None] = mapped_column(Text)
+
+    @property
+    def is_waived(self) -> bool:
+        """Whether this charge is off the bill.
+
+        Only an approved waiver takes money off. Kept as a property under the
+        name every surface already asks for, so the arithmetic, the documents
+        and the portal needed no change when waiving gained an approval step —
+        and so no caller can accidentally treat *requested* as *granted*.
+        """
+        return self.waiver_status is WaiverStatus.APPROVED
+
+    @property
+    def waiver_pending(self) -> bool:
+        """Asked for and not yet decided. Internal-only: still billed."""
+        return self.waiver_status is WaiverStatus.PENDING
+
     internal_note: Mapped[str | None] = mapped_column(Text)
     #: 'manual', 'plate_calculator' or 'shipment'
     source: Mapped[str] = mapped_column(String(30), nullable=False, default="manual")

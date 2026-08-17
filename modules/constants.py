@@ -57,6 +57,11 @@ class Perm(StrEnum):
     QUOTE_RETURN_FOR_REVISION = "quote.return_for_revision"
     QUOTE_OVERRIDE_WARNING = "quote.override_warning"
     QUOTE_APPROVE_CUSTOM_PRICE = "quote.approve_custom_price"
+    #: Waiving a charge gives money away, so it is split from editing the
+    #: quotation: whoever may put a charge on one may *ask* for it to be
+    #: waived, and only an approver may decide.
+    CHARGE_WAIVER_REQUEST = "charge.request_waiver"
+    CHARGE_WAIVER_APPROVE = "charge.approve_waiver"
     QUOTE_GENERATE_PDF = "quote.generate_pdf"
     QUOTE_UPDATE_STATUS = "quote.update_status"
     QUOTE_CREATE_REVISION = "quote.create_revision"
@@ -192,6 +197,7 @@ ROLE_PERMISSIONS: dict[RoleCode, frozenset[Perm]] = {
         Perm.QUOTE_PORTAL_LINK_ISSUE, Perm.QUOTE_PORTAL_LINK_REVOKE,
         Perm.QUOTE_PORTAL_PREVIEW, Perm.QUOTE_PORTAL_VIEW_RESPONSE,
         Perm.QUOTE_PORTAL_SEND, Perm.QUOTE_PORTAL_VIEW_DELIVERY,
+        Perm.CHARGE_WAIVER_REQUEST,
         Perm.CUSTOMER_VIEW, Perm.CUSTOMER_CREATE, Perm.CUSTOMER_EDIT,
         Perm.PRODUCT_VIEW, Perm.PRICE_VIEW,
         Perm.SHIPMENT_EDIT,
@@ -209,6 +215,7 @@ ROLE_PERMISSIONS: dict[RoleCode, frozenset[Perm]] = {
         Perm.QUOTE_PORTAL_PREVIEW, Perm.QUOTE_PORTAL_VIEW_RESPONSE,
         Perm.QUOTE_PORTAL_SEND, Perm.QUOTE_PORTAL_RETRY,
         Perm.QUOTE_PORTAL_VIEW_DELIVERY,
+        Perm.CHARGE_WAIVER_REQUEST, Perm.CHARGE_WAIVER_APPROVE,
         Perm.COST_VIEW, Perm.MARGIN_VIEW,
         Perm.CUSTOMER_VIEW, Perm.CUSTOMER_CREATE, Perm.CUSTOMER_EDIT, Perm.CUSTOMER_DELETE,
         Perm.PRODUCT_VIEW, Perm.PRICE_VIEW,
@@ -531,6 +538,29 @@ DEFAULT_SHIPPING_LINES: tuple[str, ...] = (
 # --------------------------------------------------------------------------- #
 # Charges
 # --------------------------------------------------------------------------- #
+
+class WaiverStatus(StrEnum):
+    """Where a charge's waiver has got to.
+
+    Only ``APPROVED`` takes money off the quotation. A ``PENDING`` waiver is
+    still billed, and is shown to employees and never to the customer — a
+    concession that has been asked for is not one that has been given, and
+    telling the customer otherwise commits the company to it.
+    """
+
+    NONE = "NONE"
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
+WAIVER_STATUS_LABELS: dict[WaiverStatus, str] = {
+    WaiverStatus.NONE: "—",
+    WaiverStatus.PENDING: "WAIVER PENDING APPROVAL",
+    WaiverStatus.APPROVED: "WAIVED",
+    WaiverStatus.REJECTED: "Waiver rejected",
+}
+
 
 class ChargeType(StrEnum):
     PRINTING_PLATES = "PRINTING_PLATES"

@@ -55,6 +55,7 @@ from modules.constants import (
     PricingBasis,
     QuotationStatus,
     TermSection,
+    WaiverStatus,
 )
 from modules.models import (
     Quotation,
@@ -691,59 +692,259 @@ def add_plate_charge(
     )
 
 
-def set_charge_waived(
-    session: Session,
-    user: AuthUser,
-    quotation: Quotation,
-    charge_id: int,
-    waived: bool,
-    reason: str | None = None,
+# --------------------------------------------------------------------------- #
+# Charge waivers
+#
+# Waiving works for every charge whatever produced it — a hand-added setup fee,
+# the plate calculator's plates, the shipment's ocean freight, and anything a
+# later charge type adds — because the status is on the charge rather than on
+# any of the things that create one. There is deliberately no list of waivable
+# types to keep in step.
+#
+# The amount is never touched by any of these. Rejecting or removing a waiver
+# therefore restores the exact figure rather than one somebody re-entered.
+# --------------------------------------------------------------------------- #
+
+def _waivable_charge(
+    session: Session, quotation: Quotation, charge_id: int
 ) -> QuotationCharge:
-    """Waive one charge, or take the waiver off it.
+    """The charge, if it is on this quotation and the quotation can still move.
 
-    Works for every charge on the quotation whatever produced it — a hand-added
-    setup fee, the plate calculator's printing plates, the shipment's ocean
-    freight, and anything a later charge type adds — because the flag is on the
-    charge rather than on any of the things that create one. There is
-    deliberately no list of waivable types to keep in step.
-
-    The amount is not touched. Un-waiving therefore restores the exact figure
-    rather than one somebody re-entered, and a waived charge still reports what
-    it would have been.
-
-    Same permission as adding or removing a charge: whoever may put a charge on
-    a quotation may decide not to collect it. The reason, where given, is
-    recorded against the audit entry — "why was the customer not billed for
-    this" is asked long after the person who decided has moved on.
+    Deliberately *not* ``require_edit_quotation``. That allows only DRAFT and
+    REVISION_REQUIRED, so a waiver requested on a draft could never be approved
+    once the quotation was submitted — the request and the decision would
+    deadlock at exactly the moment the decision was wanted. An issued quotation
+    is still immutable, which is the rule that matters.
     """
-    require_edit_quotation(user, quotation)
+    if quotation.is_locked:
+        raise QuotationError(
+            f"{quotation.display_number} has been issued. Create a revision "
+            "to change what is charged."
+        )
 
     charge = session.get(QuotationCharge, charge_id)
     if charge is None or charge.quotation_id != quotation.id:
         raise QuotationError("That charge is not part of this quotation.")
+    return charge
 
-    was = charge.is_waived
-    charge.is_waived = bool(waived)
-    session.flush()
+
+def _record_waiver(
+    session: Session,
+    user: AuthUser,
+    quotation: Quotation,
+    charge: QuotationCharge,
+    was: WaiverStatus,
+    reason: str | None,
+) -> None:
     recompute_totals(session, quotation)
-
     record_audit(
         session, user, AuditAction.QUOTATION_EDITED, EntityType.QUOTATION_CHARGE,
         charge.id,
-        old_value={"is_waived": was},
+        old_value={"waiver_status": was.value},
         new_value={
-            "is_waived": charge.is_waived,
+            "waiver_status": charge.waiver_status.value,
             "charge_type": str(charge.charge_type),
             "amount": charge.amount,
+            "requested_by_id": charge.waiver_requested_by_id,
+            "decided_by_id": charge.waiver_decided_by_id,
         },
         reason=reason,
     )
     log.info(
-        "%s charge %s on %s (%s)",
-        "Waived" if charge.is_waived else "Un-waived",
-        charge.id, quotation.quote_number, charge.amount,
+        "Charge %s on %s: waiver %s -> %s by %s (%s)",
+        charge.id, quotation.quote_number, was.value,
+        charge.waiver_status.value, user.username, charge.amount,
     )
+
+
+def request_charge_waiver(
+    session: Session,
+    user: AuthUser,
+    quotation: Quotation,
+    charge_id: int,
+    reason: str,
+) -> QuotationCharge:
+    """Ask for a charge to be waived. Changes no money.
+
+    The charge keeps being billed until a manager decides, which is the point:
+    a concession that has been asked for is not one that has been given, and
+    the quotation must not quietly reflect one that has not.
+    """
+    require(user, Perm.CHARGE_WAIVER_REQUEST)
+    charge = _waivable_charge(session, quotation, charge_id)
+
+    if not reason or not reason.strip():
+        raise QuotationError("A reason is required to request a waiver.")
+    if charge.waiver_status is WaiverStatus.APPROVED:
+        raise QuotationError("That charge has already been waived.")
+    if charge.waiver_status is WaiverStatus.PENDING:
+        raise QuotationError("A waiver for that charge is already awaiting a decision.")
+
+    was = charge.waiver_status
+    charge.waiver_status = WaiverStatus.PENDING
+    charge.waiver_reason = reason.strip()
+    charge.waiver_requested_by_id = user.id
+    charge.waiver_requested_at = dt.datetime.now(dt.UTC)
+    charge.waiver_decided_by_id = None
+    charge.waiver_decided_at = None
+    charge.waiver_decision_note = None
+    session.flush()
+
+    _record_waiver(session, user, quotation, charge, was, reason.strip())
     return charge
+
+
+def approve_charge_waiver(
+    session: Session,
+    user: AuthUser,
+    quotation: Quotation,
+    charge_id: int,
+    note: str | None = None,
+) -> QuotationCharge:
+    """Grant a pending waiver. This is where the money comes off."""
+    require(user, Perm.CHARGE_WAIVER_APPROVE)
+    charge = _waivable_charge(session, quotation, charge_id)
+
+    if charge.waiver_status is not WaiverStatus.PENDING:
+        raise QuotationError(
+            "There is no waiver awaiting a decision on that charge."
+        )
+
+    was = charge.waiver_status
+    charge.waiver_status = WaiverStatus.APPROVED
+    charge.waiver_decided_by_id = user.id
+    charge.waiver_decided_at = dt.datetime.now(dt.UTC)
+    charge.waiver_decision_note = (note or "").strip() or None
+    session.flush()
+
+    _record_waiver(session, user, quotation, charge, was, charge.waiver_reason)
+    return charge
+
+
+def reject_charge_waiver(
+    session: Session,
+    user: AuthUser,
+    quotation: Quotation,
+    charge_id: int,
+    note: str | None = None,
+) -> QuotationCharge:
+    """Refuse a pending waiver. The charge goes on being billed.
+
+    The request and the refusal both stay on the charge. Clearing them would
+    lose that the concession was asked for and declined, which is the part
+    somebody asks about later.
+    """
+    require(user, Perm.CHARGE_WAIVER_APPROVE)
+    charge = _waivable_charge(session, quotation, charge_id)
+
+    if charge.waiver_status is not WaiverStatus.PENDING:
+        raise QuotationError(
+            "There is no waiver awaiting a decision on that charge."
+        )
+
+    was = charge.waiver_status
+    charge.waiver_status = WaiverStatus.REJECTED
+    charge.waiver_decided_by_id = user.id
+    charge.waiver_decided_at = dt.datetime.now(dt.UTC)
+    charge.waiver_decision_note = (note or "").strip() or None
+    session.flush()
+
+    _record_waiver(session, user, quotation, charge, was, charge.waiver_reason)
+    return charge
+
+
+def waive_charge_directly(
+    session: Session,
+    user: AuthUser,
+    quotation: Quotation,
+    charge_id: int,
+    reason: str,
+) -> QuotationCharge:
+    """A manager waiving without waiting for a request they would approve.
+
+    Recorded as requested *and* decided by the same person, deliberately: the
+    audit history should show a one-step waiver as a one-step waiver rather
+    than manufacturing a request nobody made.
+    """
+    require(user, Perm.CHARGE_WAIVER_APPROVE)
+    charge = _waivable_charge(session, quotation, charge_id)
+
+    if not reason or not reason.strip():
+        raise QuotationError("A reason is required to waive a charge.")
+    if charge.waiver_status is WaiverStatus.APPROVED:
+        raise QuotationError("That charge has already been waived.")
+
+    was = charge.waiver_status
+    now = dt.datetime.now(dt.UTC)
+    charge.waiver_status = WaiverStatus.APPROVED
+    charge.waiver_reason = reason.strip()
+    charge.waiver_requested_by_id = user.id
+    charge.waiver_requested_at = now
+    charge.waiver_decided_by_id = user.id
+    charge.waiver_decided_at = now
+    session.flush()
+
+    _record_waiver(session, user, quotation, charge, was, reason.strip())
+    return charge
+
+
+def remove_charge_waiver(
+    session: Session,
+    user: AuthUser,
+    quotation: Quotation,
+    charge_id: int,
+    reason: str | None = None,
+) -> QuotationCharge:
+    """Put an approved waiver back on the bill. Needs the approver's authority.
+
+    Un-waiving adds money to a quotation that may already have been shown to a
+    customer, so it is the same decision as granting one and takes the same
+    permission.
+    """
+    require(user, Perm.CHARGE_WAIVER_APPROVE)
+    charge = _waivable_charge(session, quotation, charge_id)
+
+    if charge.waiver_status is not WaiverStatus.APPROVED:
+        raise QuotationError("That charge is not waived.")
+
+    was = charge.waiver_status
+    charge.waiver_status = WaiverStatus.NONE
+    charge.waiver_decided_by_id = user.id
+    charge.waiver_decided_at = dt.datetime.now(dt.UTC)
+    charge.waiver_decision_note = (reason or "").strip() or None
+    session.flush()
+
+    _record_waiver(session, user, quotation, charge, was, reason)
+    return charge
+
+
+def pending_waivers(
+    session: Session, user: AuthUser
+) -> list[tuple[QuotationCharge, Quotation]]:
+    """Charges awaiting a waiver decision, for the approver's queue.
+
+    Shaped like :func:`approval_service.queue` and filtered the same way: a
+    deleted quotation leaves its pending request behind, and offering an
+    approver a quotation that appears nowhere else is how a waiver gets granted
+    on something already thrown away.
+
+    Unlike quotation approval this does **not** exclude the requester's own
+    quotations. Waiving is decided on the money, not on who raised it, and a
+    manager waiving a charge on their own quotation is the direct-waive path
+    the business asked for.
+    """
+    require(user, Perm.CHARGE_WAIVER_APPROVE)
+
+    rows = session.execute(
+        select(QuotationCharge, Quotation)
+        .join(Quotation, QuotationCharge.quotation_id == Quotation.id)
+        .where(
+            QuotationCharge.waiver_status == WaiverStatus.PENDING,
+            Quotation.deleted_at.is_(None),
+        )
+        .order_by(QuotationCharge.waiver_requested_at)
+    ).all()
+    return [(charge, quotation) for charge, quotation in rows]
 
 
 def remove_charge(

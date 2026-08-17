@@ -568,11 +568,20 @@ def _copy_charge(charge: QuotationCharge, quotation_id: int) -> QuotationCharge:
         exchange_rate=charge.exchange_rate,
         is_taxable=charge.is_taxable,
         is_customer_visible=charge.is_customer_visible,
-        # A revision inherits the waiver. A concession already made to the
-        # customer does not quietly reappear as a charge because the quotation
-        # was reissued; taking it back is a decision, and the revision is
-        # editable so it can be made explicitly.
-        is_waived=charge.is_waived,
+        # A revision inherits the waiver *and its decision*. A concession
+        # already granted does not quietly reappear as a charge because the
+        # quotation was reissued, and a request still awaiting a manager does
+        # not lose its place in the queue — it is the same request, about the
+        # same money, on the document that superseded the one it was raised on.
+        # Taking either back is a decision, and remove_charge_waiver is where
+        # it is made.
+        waiver_status=charge.waiver_status,
+        waiver_reason=charge.waiver_reason,
+        waiver_requested_by_id=charge.waiver_requested_by_id,
+        waiver_requested_at=charge.waiver_requested_at,
+        waiver_decided_by_id=charge.waiver_decided_by_id,
+        waiver_decided_at=charge.waiver_decided_at,
+        waiver_decision_note=charge.waiver_decision_note,
         internal_note=charge.internal_note,
         source=charge.source,
     )

@@ -122,21 +122,27 @@ class TestProjectionSafety:
         applied, and leaving it in the total would bill for something the
         quotation says was waived.
         """
-        from modules.constants import ChargeType
+        from modules.constants import ChargeType, WaiverStatus
         from modules.models import QuotationCharge
 
         token, _ = link
         before = portal_service.compute_selection_totals(sent, [])
 
-        # Written directly rather than through add_charge: this fixture's
-        # quotation has been issued and sent, so the service correctly refuses
-        # to edit it. What is under test is the projection, not the writer.
+        # Written directly rather than through the service: this fixture's
+        # quotation has been issued and sent, so waiving is correctly refused.
+        # What is under test is the projection, not the writer.
+        #
+        # APPROVED, not "is_waived=True" — that is a read-only property now,
+        # and the constructor rejects it. Which is the point: nothing can put a
+        # charge into the waived state except by way of a decision.
         session.add(
             QuotationCharge(
                 quotation_id=sent.id, sort_order=99,
                 charge_type=ChargeType.CUTTING_DIES, description="Cutting Dies",
                 quantity_value=D("1"), rate=D("400"), amount=D("400.00"),
-                currency=sent.currency, is_waived=True,
+                currency=sent.currency,
+                waiver_status=WaiverStatus.APPROVED,
+                waiver_reason="Goodwill",
             )
         )
         session.commit()

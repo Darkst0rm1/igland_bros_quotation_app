@@ -10,10 +10,14 @@ from __future__ import annotations
 
 import streamlit as st
 
-from modules import approval_service, pricing_service
+from modules import approval_service, pricing_service, quotation_service
 from modules.approval_service import ApprovalError
 from modules.authorization import PermissionDenied, can_view_costs
-from modules.constants import STATUS_DISPLAY_NAMES, Perm
+from modules.constants import (
+    CHARGE_TYPE_DISPLAY_NAMES,
+    STATUS_DISPLAY_NAMES,
+    Perm,
+)
 from modules.database import session_scope
 from modules.models import Quotation, User
 from modules.session import page_header, require_page
@@ -23,6 +27,71 @@ user = require_page(Perm.QUOTE_APPROVE)
 page_header("Approval Queue", "Quotations awaiting your decision")
 
 show_costs = can_view_costs(user)
+
+
+# --------------------------------------------------------------------------- #
+# Charge waivers
+#
+# First on the page, and deliberately before the ``st.stop()`` that ends it
+# when no quotation is awaiting a decision: a manager with waivers to decide
+# and no quotations to approve would otherwise be told nothing is waiting for
+# them while money sits unbilled.
+# --------------------------------------------------------------------------- #
+
+if user.has(Perm.CHARGE_WAIVER_APPROVE):
+    with session_scope() as db:
+        waiver_rows = [
+            {
+                "charge_id": charge.id,
+                "quotation_id": quotation.id,
+                "Quotation": quotation.display_number,
+                "Customer": quotation.customer_name_snapshot or "-",
+                "Charge": (
+                    charge.description
+                    or CHARGE_TYPE_DISPLAY_NAMES.get(
+                        charge.charge_type, str(charge.charge_type)
+                    )
+                ),
+                "Amount": format_money(charge.amount, charge.currency),
+                "Requested by": (
+                    requester.employee_name if requester else "-"
+                ),
+                "Requested": (
+                    charge.waiver_requested_at.strftime("%d %b %Y %H:%M")
+                    if charge.waiver_requested_at else "-"
+                ),
+                "Reason": charge.waiver_reason or "-",
+            }
+            for charge, quotation in quotation_service.pending_waivers(db, user)
+            for requester in [db.get(User, charge.waiver_requested_by_id)]
+        ]
+
+    st.markdown("##### Charge waivers awaiting your decision")
+    if waiver_rows:
+        st.caption(
+            f"{len(waiver_rows)} charge(s) requested to be waived. Each is "
+            f"still being billed until you decide."
+        )
+        st.dataframe(
+            [
+                {k: v for k, v in row.items() if not k.endswith("_id")}
+                for row in waiver_rows
+            ],
+            width="stretch", hide_index=True,
+        )
+        picked = st.selectbox(
+            "Open the quotation to decide",
+            waiver_rows,
+            format_func=lambda r: f"{r['Quotation']} — {r['Charge']} {r['Amount']}",
+            key="waiver_pick",
+        )
+        if st.button("Open quotation", key="waiver_open"):
+            st.session_state["active_quotation_id"] = picked["quotation_id"]
+            st.switch_page("pages/02_Create_Quotation.py")
+    else:
+        st.caption("No charge waivers are awaiting a decision.")
+    st.divider()
+
 
 with session_scope() as db:
     rows = []

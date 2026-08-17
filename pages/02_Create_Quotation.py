@@ -58,6 +58,7 @@ from modules.constants import (
     PricingBasis,
     QuotationStatus,
     SendMethod,
+    WaiverStatus,
 )
 from modules.database import session_scope
 from modules.models import (
@@ -269,7 +270,11 @@ with session_scope() as db:
             "amount": c.amount,
             "taxable": c.is_taxable,
             "visible": c.is_customer_visible,
+            "waiver_status": c.waiver_status,
             "waived": c.is_waived,
+            "waiver_pending": c.waiver_pending,
+            "waiver_reason": c.waiver_reason or "",
+            "waiver_decision_note": c.waiver_decision_note or "",
             "sort_order": c.sort_order,
         }
         for c in sorted(quotation.charges, key=lambda c: c.sort_order)
@@ -553,12 +558,12 @@ _LINE_COLUMN_LABELS = [
     "Price/pack", "Disc %", "Net", "Actions",
 ]
 
-#: The charges table, drawn the same way and for the same reason: the waive
+#: The charges table, drawn the same way and for the same reason: the waiver
 #: control has to sit on the charge it waives.
-_CHARGE_COLUMN_WIDTHS = [1.6, 2.4, 0.7, 1.1, 1.2, 0.8, 1.3, 1.1]
+_CHARGE_COLUMN_WIDTHS = [1.4, 2.0, 0.6, 1.0, 1.1, 0.7, 1.1, 1.8, 1.4]
 _CHARGE_COLUMN_LABELS = [
     "Type", "Description", "Qty", "Rate", "Amount", "Taxable",
-    "On document", "Waive",
+    "On document", "Waiver", "Action",
 ]
 
 
@@ -1529,6 +1534,143 @@ with shipping_tab:
 # Charges
 # --------------------------------------------------------------------------- #
 
+@st.dialog("Waiver")
+def _waiver_dialog(charge_id: int, action: str, label: str, amount: str) -> None:
+    """Ask for, grant, refuse or lift a waiver — whichever the button meant.
+
+    One dialog for all four because all four need the same thing: a person, a
+    reason, and a confirmation that this is the charge they meant. The service
+    decides what each one is allowed to do; this only collects the words.
+    """
+    st.markdown(f"**{escape_markdown(label)}** — {escape_markdown(amount)}")
+
+    prompts = {
+        "request": (
+            "Why should this charge be waived?",
+            "Sent to a manager. The charge goes on being billed until they decide.",
+            "Request waiver",
+        ),
+        "approve": (
+            "Note for the record (optional)",
+            "Approving takes this amount off the quotation.",
+            "Approve waiver",
+        ),
+        "reject": (
+            "Why is it being refused? (optional)",
+            "The charge goes on being billed. The request stays on the record.",
+            "Reject waiver",
+        ),
+        "direct": (
+            "Why is this charge being waived?",
+            "Waived immediately on your own authority, and recorded as such.",
+            "Waive charge",
+        ),
+        "remove": (
+            "Why is the waiver being lifted? (optional)",
+            "This puts the amount back on the quotation.",
+            "Put the charge back",
+        ),
+    }
+    prompt, caption, button = prompts[action]
+    st.caption(caption)
+
+    if action == "request" and charges:
+        pending = next((c for c in charges if c["id"] == charge_id), None)
+        if pending and pending["waiver_reason"]:
+            st.caption(f"Previously: {escape_markdown(pending['waiver_reason'])}")
+
+    text = st.text_area(prompt, key=f"waiver_text_{action}_{charge_id}")
+    go_col, cancel_col = st.columns(2)
+    confirmed = go_col.button(button, type="primary", width="stretch",
+                              key=f"waiver_go_{action}_{charge_id}")
+    if cancel_col.button("Cancel", width="stretch",
+                         key=f"waiver_cancel_{action}_{charge_id}"):
+        st.rerun()
+
+    if not confirmed:
+        return
+
+    try:
+        with session_scope() as db:
+            quote = db.get(Quotation, quotation_id)
+            if action == "request":
+                quotation_service.request_charge_waiver(
+                    db, user, quote, charge_id, text
+                )
+            elif action == "approve":
+                quotation_service.approve_charge_waiver(
+                    db, user, quote, charge_id, text or None
+                )
+            elif action == "reject":
+                quotation_service.reject_charge_waiver(
+                    db, user, quote, charge_id, text or None
+                )
+            elif action == "direct":
+                quotation_service.waive_charge_directly(
+                    db, user, quote, charge_id, text
+                )
+            else:
+                quotation_service.remove_charge_waiver(
+                    db, user, quote, charge_id, text or None
+                )
+    except (QuotationError, PermissionDenied) as exc:
+        # Inside the dialog: the wording typed is not lost to an error.
+        st.error(str(exc))
+    else:
+        st.rerun()
+
+
+def _waiver_controls(charge: dict) -> None:
+    """The buttons one viewer may press on one charge.
+
+    Permission decides what is drawn, and the service decides again when it is
+    pressed. Hiding a button is a courtesy; the check in
+    ``quotation_service`` is the control.
+    """
+    may_request = user.has(Perm.CHARGE_WAIVER_REQUEST)
+    may_approve = user.has(Perm.CHARGE_WAIVER_APPROVE)
+    # Locked, not "not editable": a waiver may still be decided on a quotation
+    # that has been submitted for approval, which is exactly when the decision
+    # is wanted. Only issuing it closes the door.
+    if header["is_locked"] or not (may_request or may_approve):
+        st.caption("—")
+        return
+
+    label = charge["description"] or charge["type"]
+    amount = format_money(charge["amount"], ccy)
+    status = charge["waiver_status"]
+
+    if status is WaiverStatus.PENDING:
+        if may_approve:
+            yes_col, no_col = st.columns(2)
+            if yes_col.button("Approve", key=f"wv_ok_{charge['id']}",
+                              type="primary", width="stretch"):
+                _waiver_dialog(charge["id"], "approve", label, amount)
+            if no_col.button("Reject", key=f"wv_no_{charge['id']}",
+                             width="stretch"):
+                _waiver_dialog(charge["id"], "reject", label, amount)
+        else:
+            st.caption("Awaiting a manager")
+        return
+
+    if status is WaiverStatus.APPROVED:
+        if may_approve:
+            if st.button("Un-waive", key=f"wv_un_{charge['id']}", width="stretch"):
+                _waiver_dialog(charge["id"], "remove", label, amount)
+        else:
+            st.caption("Manager only")
+        return
+
+    # NONE or REJECTED — a waiver can be asked for, or granted outright.
+    if may_approve:
+        if st.button("Waive", key=f"wv_dir_{charge['id']}", width="stretch"):
+            _waiver_dialog(charge["id"], "direct", label, amount)
+    elif may_request:
+        if st.button("Request waiver", key=f"wv_req_{charge['id']}",
+                     width="stretch"):
+            _waiver_dialog(charge["id"], "request", label, amount)
+
+
 with charges_tab:
     if charges:
         # Columns rather than a dataframe, for the same reason as the lines
@@ -1557,33 +1699,24 @@ with charges_tab:
             )
             cells[5].write("Yes" if c["taxable"] else "No")
             cells[6].write("Yes" if c["visible"] else "Internal only")
+
+            # The status is stated on every row, whatever the viewer may do
+            # about it. "WAIVER PENDING APPROVAL" is internal — no customer
+            # surface reads waiver_status, only is_waived.
             with cells[7]:
-                if editable:
-                    waived_now = st.checkbox(
-                        "Waived",
-                        value=c["waived"],
-                        key=f"waive_{c['id']}",
-                        help=(
-                            "Shown on the quotation at its full amount and "
-                            "billed at nothing. Not a discount, and not a "
-                            "deletion — the customer sees the concession."
-                        ),
+                if c["waiver_pending"]:
+                    st.markdown(
+                        ":orange-badge[WAIVER PENDING APPROVAL]"
                     )
-                    if waived_now != c["waived"]:
-                        try:
-                            with session_scope() as db:
-                                quotation_service.set_charge_waived(
-                                    db, user, db.get(Quotation, quotation_id),
-                                    c["id"], waived_now,
-                                )
-                        except (QuotationError, PermissionDenied) as exc:
-                            st.error(str(exc))
-                        else:
-                            st.rerun()
                 elif c["waived"]:
-                    st.caption("WAIVED")
+                    st.markdown(":green-badge[WAIVED]")
+                elif c["waiver_status"] is WaiverStatus.REJECTED:
+                    st.markdown(":red-badge[Waiver rejected]")
                 else:
                     st.caption("—")
+
+            with cells[8]:
+                _waiver_controls(c)
 
         st.divider()
         # Both figures come from the engine. The page states them; it does not

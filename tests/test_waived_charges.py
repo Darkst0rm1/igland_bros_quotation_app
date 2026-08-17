@@ -23,7 +23,15 @@ from modules import pricing_snapshot, quotation_service, revision_service
 from modules.authorization import PermissionDenied
 from modules.calculation_engine import ChargeInput, compute_totals
 from modules.catalogue_service import create_product, create_variant, set_price
-from modules.constants import ChargeType, ContainerSize, FreightMethod, PriceTierCode, RoleCode
+from modules.constants import (
+    ChargeType,
+    ContainerSize,
+    FreightMethod,
+    PriceTierCode,
+    QuotationStatus,
+    RoleCode,
+    WaiverStatus,
+)
 from modules.customer_service import create_customer
 from modules.models import QuotationCharge, ShippingLine
 from modules.quotation_service import QuotationError
@@ -178,8 +186,8 @@ class TestWaiving:
     def test_it_works_on_any_charge_type(self, session, admin, quotation, four_charges):
         """No list of waivable types exists, so a new one needs no change."""
         for key, charge in four_charges.items():
-            quotation_service.set_charge_waived(
-                session, admin, quotation, charge.id, True
+            quotation_service.waive_charge_directly(
+                session, admin, quotation, charge.id, "goodwill"
             )
             session.commit()
             assert charge.is_waived, key
@@ -193,8 +201,8 @@ class TestWaiving:
             k: (c.amount, c.is_waived)
             for k, c in four_charges.items() if k != "dies"
         }
-        quotation_service.set_charge_waived(
-            session, admin, quotation, four_charges["dies"].id, True
+        quotation_service.waive_charge_directly(
+            session, admin, quotation, four_charges["dies"].id, "goodwill"
         )
         session.commit()
 
@@ -209,7 +217,9 @@ class TestWaiving:
 
     def test_the_amount_is_not_rewritten(self, session, admin, quotation, four_charges):
         dies = four_charges["dies"]
-        quotation_service.set_charge_waived(session, admin, quotation, dies.id, True)
+        quotation_service.waive_charge_directly(
+            session, admin, quotation, dies.id, "goodwill"
+        )
         session.commit()
         assert dies.amount == D("400.00"), "the original was overwritten"
 
@@ -219,33 +229,51 @@ class TestWaiving:
         dies = four_charges["dies"]
         before = quotation.grand_total
 
-        quotation_service.set_charge_waived(session, admin, quotation, dies.id, True)
+        quotation_service.waive_charge_directly(
+            session, admin, quotation, dies.id, "goodwill"
+        )
         session.commit()
         assert quotation.grand_total == before - D("400.00")
 
-        quotation_service.set_charge_waived(session, admin, quotation, dies.id, False)
+        quotation_service.remove_charge_waiver(
+            session, admin, quotation, dies.id, "billing it after all"
+        )
         session.commit()
         assert dies.is_waived is False
         assert dies.amount == D("400.00")
         assert quotation.grand_total == before
 
-    def test_waiving_twice_is_not_cumulative(
+    def test_waiving_an_already_waived_charge_is_refused(
         self, session, admin, quotation, four_charges
     ):
+        """Not merely idempotent — refused, so a second click cannot re-decide.
+
+        The old boolean took a repeat silently. With a decision attached, a
+        second waive would overwrite who decided and when, which is the part
+        somebody asks about afterwards.
+        """
         dies = four_charges["dies"]
-        for _ in range(3):
-            quotation_service.set_charge_waived(
-                session, admin, quotation, dies.id, True
-            )
+        quotation_service.waive_charge_directly(
+            session, admin, quotation, dies.id, "goodwill"
+        )
         session.commit()
+        decided_at = dies.waiver_decided_at
+
+        with pytest.raises(QuotationError, match="already been waived"):
+            quotation_service.waive_charge_directly(
+                session, admin, quotation, dies.id, "goodwill again"
+            )
+
+        assert dies.waiver_decided_at == decided_at
+        assert dies.waiver_reason == "goodwill"
         assert quotation.charges_total == D("285.00")
 
     def test_the_totals_are_recalculated_immediately(
         self, session, admin, quotation, four_charges
     ):
         """Stored, not merely computed on read: history and approval use these."""
-        quotation_service.set_charge_waived(
-            session, admin, quotation, four_charges["setup"].id, True
+        quotation_service.waive_charge_directly(
+            session, admin, quotation, four_charges["setup"].id, "goodwill"
         )
         session.commit()
         snap = pricing_snapshot.base(quotation)
@@ -261,8 +289,8 @@ class TestWaiving:
         )
         session.flush()
         with pytest.raises(QuotationError, match="not part of this quotation"):
-            quotation_service.set_charge_waived(
-                session, admin, other, four_charges["dies"].id, True
+            quotation_service.waive_charge_directly(
+                session, admin, other, four_charges["dies"].id, "goodwill"
             )
         assert four_charges["dies"].is_waived is False
 
@@ -273,16 +301,16 @@ class TestWaiving:
         quotation_service.remove_charge(session, admin, quotation, dies_id)
         session.commit()
         with pytest.raises(QuotationError, match="not part of this quotation"):
-            quotation_service.set_charge_waived(
-                session, admin, quotation, dies_id, True
+            quotation_service.waive_charge_directly(
+                session, admin, quotation, dies_id, "goodwill"
             )
 
     def test_sales_cannot_waive_on_someone_else_s_quotation(
         self, session, sales, quotation, four_charges
     ):
         with pytest.raises(PermissionDenied):
-            quotation_service.set_charge_waived(
-                session, sales, quotation, four_charges["dies"].id, True
+            quotation_service.waive_charge_directly(
+                session, sales, quotation, four_charges["dies"].id, "goodwill"
             )
         assert four_charges["dies"].is_waived is False
 
@@ -293,9 +321,8 @@ class TestWaiving:
 
         from modules.models import AuditLog
 
-        quotation_service.set_charge_waived(
-            session, admin, quotation, four_charges["dies"].id, True,
-            reason="Goodwill on a first order",
+        quotation_service.waive_charge_directly(
+            session, admin, quotation, four_charges["dies"].id, "Goodwill on a first order",
         )
         session.commit()
 
@@ -304,9 +331,13 @@ class TestWaiving:
             if r.reason == "Goodwill on a first order"
         ]
         assert rows, "the waiver was not audited"
-        assert rows[0].new_value_json["is_waived"] is True
-        assert rows[0].old_value_json["is_waived"] is False
+        assert rows[0].new_value_json["waiver_status"] == "APPROVED"
+        assert rows[0].old_value_json["waiver_status"] == "NONE"
         assert str(rows[0].new_value_json["amount"]) == "400.00"
+        # Who asked and who decided, both recorded — the same person here,
+        # because a manager waiving directly is a one-step waiver.
+        assert rows[0].new_value_json["requested_by_id"] == admin.id
+        assert rows[0].new_value_json["decided_by_id"] == admin.id
 
 
 class TestWaivingFreight:
@@ -335,8 +366,8 @@ class TestWaivingFreight:
         freight = self._freight(session, with_freight)
         assert with_freight.grand_total == D("28800.00")
 
-        quotation_service.set_charge_waived(
-            session, admin, with_freight, freight.id, True
+        quotation_service.waive_charge_directly(
+            session, admin, with_freight, freight.id, "goodwill"
         )
         session.commit()
 
@@ -355,8 +386,8 @@ class TestWaivingFreight:
         from modules import shipping_service
 
         freight = self._freight(session, with_freight)
-        quotation_service.set_charge_waived(
-            session, admin, with_freight, freight.id, True
+        quotation_service.waive_charge_directly(
+            session, admin, with_freight, freight.id, "goodwill"
         )
         session.commit()
 
@@ -374,8 +405,8 @@ class TestWaivingFreight:
         from modules import shipping_service
 
         freight = self._freight(session, with_freight)
-        quotation_service.set_charge_waived(
-            session, admin, with_freight, freight.id, True
+        quotation_service.waive_charge_directly(
+            session, admin, with_freight, freight.id, "goodwill"
         )
         session.commit()
 
@@ -392,6 +423,312 @@ class TestWaivingFreight:
 
 
 # --------------------------------------------------------------------------- #
+# The approval workflow
+# --------------------------------------------------------------------------- #
+
+class TestTheApprovalWorkflow:
+    """An employee asks; a manager decides; the charge is billed in between."""
+
+    @pytest.fixture
+    def manager(self, make_auth_user):
+        return make_auth_user(RoleCode.SALES_MANAGER.value)
+
+    @pytest.fixture
+    def requested(self, session, sales, admin, quotation, four_charges):
+        quotation.sales_user_id = sales.id
+        session.flush()
+        quotation_service.request_charge_waiver(
+            session, sales, quotation, four_charges["dies"].id,
+            "Customer is a first order and asked for the dies to be covered",
+        )
+        session.commit()
+        return four_charges["dies"]
+
+    # --- requesting -------------------------------------------------------- #
+
+    def test_a_pending_waiver_is_still_billed(self, session, quotation, requested):
+        """The load-bearing rule. Asking is not receiving."""
+        assert requested.waiver_status is WaiverStatus.PENDING
+        assert requested.waiver_pending
+        assert requested.is_waived is False
+        assert quotation.charges_total == D("685.00")   # all four still charged
+        assert quotation.grand_total == D("20685.00")
+
+    def test_the_requester_and_the_reason_are_stored(
+        self, session, sales, requested
+    ):
+        assert requested.waiver_requested_by_id == sales.id
+        assert requested.waiver_requested_at is not None
+        assert "first order" in requested.waiver_reason
+        assert requested.waiver_decided_by_id is None
+        assert requested.waiver_decided_at is None
+
+    def test_a_reason_is_required(self, session, sales, quotation, four_charges):
+        for empty in ("", "   "):
+            with pytest.raises(QuotationError, match="reason is required"):
+                quotation_service.request_charge_waiver(
+                    session, sales, quotation, four_charges["setup"].id, empty
+                )
+        assert four_charges["setup"].waiver_status is WaiverStatus.NONE
+
+    def test_requesting_twice_is_refused(self, session, sales, quotation, requested):
+        with pytest.raises(QuotationError, match="already awaiting"):
+            quotation_service.request_charge_waiver(
+                session, sales, quotation, requested.id, "asking again"
+            )
+
+    def test_a_role_without_the_permission_cannot_request(
+        self, session, make_auth_user, quotation, four_charges
+    ):
+        pricing_admin = make_auth_user(RoleCode.PRICING_ADMIN.value)
+        with pytest.raises(PermissionDenied):
+            quotation_service.request_charge_waiver(
+                session, pricing_admin, quotation, four_charges["dies"].id, "why not"
+            )
+
+    # --- deciding ---------------------------------------------------------- #
+
+    def test_sales_cannot_approve_their_own_request(
+        self, session, sales, quotation, requested
+    ):
+        """The whole point of the split: asking must not be deciding."""
+        with pytest.raises(PermissionDenied):
+            quotation_service.approve_charge_waiver(
+                session, sales, quotation, requested.id
+            )
+        assert requested.is_waived is False
+        assert quotation.charges_total == D("685.00")
+
+    def test_a_manager_approving_takes_the_money_off(
+        self, session, manager, quotation, requested
+    ):
+        quotation_service.approve_charge_waiver(
+            session, manager, quotation, requested.id, "Agreed, first order"
+        )
+        session.commit()
+
+        assert requested.waiver_status is WaiverStatus.APPROVED
+        assert requested.is_waived
+        assert requested.amount == D("400.00"), "the amount was rewritten"
+        assert requested.waiver_decided_by_id == manager.id
+        assert requested.waiver_decided_at is not None
+        assert requested.waiver_decision_note == "Agreed, first order"
+        # The requester is preserved: it was not the manager who asked.
+        assert requested.waiver_requested_by_id != manager.id
+        assert quotation.charges_total == D("285.00")
+        assert quotation.grand_total == D("20285.00")
+
+    def test_a_manager_rejecting_goes_on_billing_it(
+        self, session, manager, quotation, requested
+    ):
+        quotation_service.reject_charge_waiver(
+            session, manager, quotation, requested.id, "Margin is already thin"
+        )
+        session.commit()
+
+        assert requested.waiver_status is WaiverStatus.REJECTED
+        assert requested.is_waived is False
+        assert quotation.charges_total == D("685.00")
+        assert quotation.grand_total == D("20685.00")
+        # The refusal is kept, not cleared.
+        assert requested.waiver_decision_note == "Margin is already thin"
+        assert "first order" in requested.waiver_reason
+
+    def test_a_rejected_waiver_can_be_asked_for_again(
+        self, session, sales, manager, quotation, requested
+    ):
+        quotation_service.reject_charge_waiver(
+            session, manager, quotation, requested.id
+        )
+        session.commit()
+        quotation_service.request_charge_waiver(
+            session, sales, quotation, requested.id, "the customer pushed back"
+        )
+        session.commit()
+        assert requested.waiver_status is WaiverStatus.PENDING
+
+    def test_deciding_something_nobody_asked_for_is_refused(
+        self, session, manager, quotation, four_charges
+    ):
+        for decide in (
+            quotation_service.approve_charge_waiver,
+            quotation_service.reject_charge_waiver,
+        ):
+            with pytest.raises(QuotationError, match="no waiver awaiting"):
+                decide(session, manager, quotation, four_charges["setup"].id)
+
+    # --- direct waiving ---------------------------------------------------- #
+
+    def test_a_manager_may_waive_without_a_request(
+        self, session, manager, quotation, four_charges
+    ):
+        charge = four_charges["setup"]
+        quotation_service.waive_charge_directly(
+            session, manager, quotation, charge.id, "Covered as a gesture"
+        )
+        session.commit()
+
+        assert charge.is_waived
+        # Recorded as a one-step waiver rather than a fabricated request.
+        assert charge.waiver_requested_by_id == manager.id
+        assert charge.waiver_decided_by_id == manager.id
+        assert charge.waiver_requested_at == charge.waiver_decided_at
+
+    def test_a_direct_waiver_needs_a_reason(
+        self, session, manager, quotation, four_charges
+    ):
+        with pytest.raises(QuotationError, match="reason is required"):
+            quotation_service.waive_charge_directly(
+                session, manager, quotation, four_charges["setup"].id, "  "
+            )
+
+    def test_sales_cannot_waive_directly(
+        self, session, sales, quotation, four_charges
+    ):
+        with pytest.raises(PermissionDenied):
+            quotation_service.waive_charge_directly(
+                session, sales, quotation, four_charges["dies"].id, "please"
+            )
+
+    # --- un-waiving -------------------------------------------------------- #
+
+    def test_unwaiving_needs_the_approver(
+        self, session, sales, manager, quotation, requested
+    ):
+        quotation_service.approve_charge_waiver(
+            session, manager, quotation, requested.id
+        )
+        session.commit()
+
+        with pytest.raises(PermissionDenied):
+            quotation_service.remove_charge_waiver(
+                session, sales, quotation, requested.id, "billing it after all"
+            )
+        assert requested.is_waived
+
+        quotation_service.remove_charge_waiver(
+            session, manager, quotation, requested.id, "billing it after all"
+        )
+        session.commit()
+        assert requested.waiver_status is WaiverStatus.NONE
+        assert requested.amount == D("400.00")
+        assert quotation.charges_total == D("685.00")
+
+    def test_unwaiving_something_not_waived_is_refused(
+        self, session, manager, quotation, four_charges
+    ):
+        with pytest.raises(QuotationError, match="not waived"):
+            quotation_service.remove_charge_waiver(
+                session, manager, quotation, four_charges["setup"].id
+            )
+
+    # --- the queue --------------------------------------------------------- #
+
+    def test_the_queue_lists_what_is_awaiting_a_decision(
+        self, session, manager, quotation, requested
+    ):
+        rows = quotation_service.pending_waivers(session, manager)
+        assert [c.id for c, _ in rows] == [requested.id]
+        assert rows[0][1].id == quotation.id
+
+    def test_the_queue_empties_once_decided(
+        self, session, manager, quotation, requested
+    ):
+        quotation_service.approve_charge_waiver(
+            session, manager, quotation, requested.id
+        )
+        session.commit()
+        assert quotation_service.pending_waivers(session, manager) == []
+
+    def test_sales_cannot_see_the_queue(self, session, sales):
+        with pytest.raises(PermissionDenied):
+            quotation_service.pending_waivers(session, sales)
+
+    # --- an issued quotation ----------------------------------------------- #
+
+    def test_nothing_may_be_waived_on_an_issued_quotation(
+        self, session, manager, quotation, four_charges
+    ):
+        revision_service.issue(session, manager, quotation)
+        session.commit()
+        with pytest.raises(QuotationError, match="has been issued"):
+            quotation_service.waive_charge_directly(
+                session, manager, quotation, four_charges["dies"].id, "too late"
+            )
+
+    def test_a_waiver_can_be_decided_while_the_quotation_awaits_approval(
+        self, session, sales, manager, quotation, requested
+    ):
+        """The deadlock this avoids.
+
+        ``require_edit_quotation`` allows only DRAFT and REVISION_REQUIRED, so
+        gating waivers on it would mean a request raised on a draft could never
+        be decided once the quotation was submitted — which is exactly when the
+        manager is looking at it.
+        """
+        quotation_service.change_status(
+            session, manager, quotation, QuotationStatus.PENDING_APPROVAL
+        )
+        session.commit()
+
+        # The quotation is genuinely no longer editable at this point, which is
+        # what would have blocked the decision.
+        from modules.authorization import can_edit_quotation
+
+        assert not can_edit_quotation(manager, quotation)
+
+        quotation_service.approve_charge_waiver(
+            session, manager, quotation, requested.id
+        )
+        session.commit()
+        assert requested.is_waived
+        assert quotation.charges_total == D("285.00")
+
+
+class TestPendingNeverReachesTheCustomer:
+    """A concession asked for is not one given, and must not look like one."""
+
+    @pytest.fixture
+    def pending(self, session, sales, quotation, four_charges):
+        quotation.sales_user_id = sales.id
+        session.flush()
+        quotation_service.request_charge_waiver(
+            session, sales, quotation, four_charges["dies"].id, "asked for"
+        )
+        session.commit()
+        return quotation
+
+    def test_the_document_shows_it_as_an_ordinary_charge(self, session, pending):
+        from modules import document_model
+
+        rows = {
+            t.label: t.amount
+            for t in document_model.build_document(session, pending).totals
+        }
+        assert rows["Cutting Dies"] == "$400.00"
+        assert not any("WAIVED" in label for label in rows)
+        assert not any("PENDING" in label.upper() for label in rows)
+        assert rows["Total (USD)"] == "$20,685.00"
+
+    def test_the_pdf_says_nothing_about_it(self, session, pending):
+        from modules import document_model, pdf_generator
+
+        text = _pdf_text(
+            pdf_generator.render(document_model.build_document(session, pending))
+        )
+        assert "WAIVED" not in text
+        assert "PENDING" not in text.upper()
+
+    def test_the_portal_shows_it_as_an_ordinary_charge(self, session, pending):
+        from portal import pdf_model
+
+        snapshot = pricing_snapshot.base(pending)
+        rows = pdf_model._charge_rows(pending, snapshot.charges_customer_visible)
+        assert not any("WAIVED" in r.label for r in rows)
+        assert not any(r.label == "Total charges" for r in rows)
+
+
+# --------------------------------------------------------------------------- #
 # Revisions
 # --------------------------------------------------------------------------- #
 
@@ -400,8 +737,8 @@ class TestRevisions:
         self, session, admin, quotation, four_charges
     ):
         """A concession already given does not reappear as a charge."""
-        quotation_service.set_charge_waived(
-            session, admin, quotation, four_charges["dies"].id, True
+        quotation_service.waive_charge_directly(
+            session, admin, quotation, four_charges["dies"].id, "goodwill"
         )
         revision_service.issue(session, admin, quotation)
         session.commit()
@@ -420,8 +757,8 @@ class TestRevisions:
     def test_unwaiving_on_the_revision_leaves_the_issued_copy_alone(
         self, session, admin, quotation, four_charges
     ):
-        quotation_service.set_charge_waived(
-            session, admin, quotation, four_charges["dies"].id, True
+        quotation_service.waive_charge_directly(
+            session, admin, quotation, four_charges["dies"].id, "goodwill"
         )
         revision_service.issue(session, admin, quotation)
         session.commit()
@@ -432,8 +769,8 @@ class TestRevisions:
         )
         session.flush()
         copy = next(c for c in revised.charges if c.is_waived)
-        quotation_service.set_charge_waived(
-            session, admin, revised, copy.id, False
+        quotation_service.remove_charge_waiver(
+            session, admin, revised, copy.id, "billing it after all"
         )
         session.commit()
 
@@ -476,8 +813,8 @@ class TestTheDocument:
         dies = session.query(QuotationCharge).filter_by(
             quotation_id=quotation.id, charge_type=ChargeType.CUTTING_DIES
         ).one()
-        quotation_service.set_charge_waived(
-            session, admin, quotation, dies.id, True
+        quotation_service.waive_charge_directly(
+            session, admin, quotation, dies.id, "goodwill"
         )
         session.commit()
         return quotation
@@ -540,8 +877,8 @@ class TestTheDocument:
         """It is invisible *and* waived: it must not reappear in the fold-in."""
         from modules import document_model
 
-        quotation_service.set_charge_waived(
-            session, admin, quotation, four_charges["internal"].id, True
+        quotation_service.waive_charge_directly(
+            session, admin, quotation, four_charges["internal"].id, "goodwill"
         )
         session.commit()
 
@@ -556,8 +893,8 @@ class TestThePortal:
 
     @pytest.fixture
     def waived(self, session, admin, quotation, four_charges):
-        quotation_service.set_charge_waived(
-            session, admin, quotation, four_charges["dies"].id, True
+        quotation_service.waive_charge_directly(
+            session, admin, quotation, four_charges["dies"].id, "goodwill"
         )
         session.commit()
         return quotation
