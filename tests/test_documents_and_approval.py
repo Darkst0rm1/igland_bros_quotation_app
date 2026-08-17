@@ -157,6 +157,54 @@ class TestDocumentModel:
         assert values["quantity_packs"] == "1,000"
         assert values["line_total"] == "$7,420.00"
 
+    def test_the_board_quality_is_on_the_document_and_the_size_is_not_doubled(
+        self, session, quotation
+    ):
+        """Two faults in one column, found by looking at a real quotation.
+
+        ``description`` fell back to ``size_label`` whenever no override was
+        typed — which is almost always — so the printed table carried the same
+        value twice under two headings. The board quality, meanwhile, reached
+        no default layout at all, and it is the part that identifies the
+        product: WTL125 FL120 IK120 and IK135 are different goods at different
+        prices on the same size.
+        """
+        columns = document_model.DEFAULT_COLUMNS
+        assert "board_quality" in columns
+        assert "description" not in columns
+        assert columns.index("board_quality") < columns.index("size")
+
+        model = document_model.build_document(session, quotation)
+        values = model.lines[0].values
+        assert values["board_quality"] == "WT110 HPFL115 KM135"
+        assert values["size"] == '12" White'
+        assert values["board_quality"] != values["size"]
+
+    def test_a_typed_description_and_the_remarks_still_reach_the_document(
+        self, session, sales, quotation
+    ):
+        """Dropping the description column must not orphan its two fields.
+
+        Both are offered on the line editor. If neither printed anywhere the
+        boxes would be controls that do nothing, which is the shape of bug this
+        codebase keeps finding.
+        """
+        from modules import quotation_service
+
+        line = quotation.items[0]
+        quotation_service.update_line(
+            session, sales, quotation, line.id,
+            description_override="Printed one colour, food grade",
+            customer_remarks="Delivered in two drops",
+        )
+        session.commit()
+
+        values = document_model.build_document(session, quotation).lines[0].values
+        assert "Printed one colour, food grade" in values["size"]
+        assert "Delivered in two drops" in values["size"]
+        # The board quality column is unaffected by either.
+        assert values["board_quality"] == "WT110 HPFL115 KM135"
+
     def test_containers_are_derived_from_the_quantity_when_none_was_typed(
         self, session, quotation, variant
     ):
@@ -404,7 +452,7 @@ class TestRenderers:
         reader = PdfReader(BytesIO(pdf_generator.render(model)))
         assert len(reader.pages) > 1
         # The table header repeats, so page two names its columns too.
-        assert "Description" in reader.pages[1].extract_text()
+        assert "Board quality" in reader.pages[1].extract_text()
 
 
 class TestNoInternalDataLeaks:

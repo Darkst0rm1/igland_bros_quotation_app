@@ -374,7 +374,18 @@ with document_tab:
                     pdf_page_size=page_size,
                     printing_plate_rate=Decimal(str(plate_rate)),
                     printing_plate_currency=plate_currency,
-                    pdf_column_set={"columns": chosen_columns},
+                    # Stored only when it differs from the default. Writing it
+                    # unconditionally froze whatever the default happened to be
+                    # on the day this page was first saved, and every later
+                    # change to DEFAULT_COLUMNS then reached nobody — the
+                    # column set looked configurable and was, in practice,
+                    # pinned. ``None`` means "follow the default", which is a
+                    # different statement from "these nine columns".
+                    pdf_column_set=(
+                        {"columns": chosen_columns}
+                        if list(chosen_columns) != list(DEFAULT_COLUMNS)
+                        else None
+                    ),
                     pdf_confidentiality_text=confidentiality.strip(),
                     pdf_thank_you_text=thank_you.strip(),
                     pdf_footer_text=footer_text.strip(),

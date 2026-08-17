@@ -50,8 +50,17 @@ AVAILABLE_COLUMNS: dict[str, str] = {
 #: fills", which is the question an export buyer actually asks. It renders as
 #: empty for any line without a container count, so a quotation that does not
 #: ship in containers simply shows a blank cell rather than a wrong number.
+#: Board quality before size, and no separate description column.
+#:
+#: "Description" printed ``description_override or size_label``, and almost no
+#: line carries an override — so the column repeated the size column beside it,
+#: on every quotation ever produced. Meanwhile the board quality was composed
+#: into a ``spec`` value that no default layout printed, which is the more
+#: expensive half: WTL125 FL120 IK120 and IK135 are different products at
+#: different prices on the same size, and a quotation that does not say which
+#: cannot be reconciled against the order it becomes.
 DEFAULT_COLUMNS = [
-    "item", "description", "size", "pack_size",
+    "item", "board_quality", "size", "pack_size",
     "quantity_packs", "containers", "price_per_pack", "price_per_piece",
     "line_total",
 ]
@@ -366,10 +375,20 @@ def _line_values(  # noqa: ANN001
     if item.customer_remarks:
         description = f"{description}\n{item.customer_remarks}"
 
+    # The size column carries the line's identity, and with it the two things
+    # that used to ride in the description column: a typed override, which is
+    # by definition what the customer should see instead of the catalogue
+    # name, and the customer remarks. Dropping that column without moving
+    # these would have left the edit dialog offering two fields that reached
+    # no document.
+    size = item.description_override or item.size_label or ""
+    if item.customer_remarks:
+        size = f"{size}\n{item.customer_remarks}"
+
     return {
         "item": str(item.line_no),
         "description": description,
-        "size": item.size_label or "",
+        "size": size,
         "board_quality": item.board_quality or "",
         "pack_size": f"{item.case_pack} / case" if item.case_pack else "",
         "moq": format_quantity(item.moq_packs) if item.moq_packs else "",
