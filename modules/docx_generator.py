@@ -398,8 +398,11 @@ def render(document: QuotationDocument, page_size: str = "A4") -> bytes:
     _write_customer(doc, document)
     _write_lines(doc, document)
     _write_totals(doc, document)
-    _write_shipping(doc, document)
+    # Terms first, then the trade terms that belong with them. Both
+    # renderers consume one model and must order it the same way, or the
+    # PDF and the Word file of one quotation read differently.
     _write_terms(doc, document)
+    _write_shipping(doc, document)
     _write_signatures(doc, document)
 
     if document.thank_you_text:

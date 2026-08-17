@@ -191,7 +191,8 @@ def base_styles() -> dict[str, ParagraphStyle]:
 
 
 def money_block(
-    rows: list[tuple[str, str, bool]], styles: dict, width: float
+    rows: list[tuple[str, str, bool]], styles: dict, width: float,
+    scale: float = 1.0,
 ):  # noqa: ANN201
     """The right-aligned totals block. ``rows`` is ``(label, amount, emphasis)``.
 
@@ -237,8 +238,8 @@ def money_block(
             quiet_table.setStyle(
                 TableStyle([
                     ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                    ("TOPPADDING", (0, 0), (-1, -1), 4),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                    ("TOPPADDING", (0, 0), (-1, -1), 4 * scale),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4 * scale),
                     ("LEFTPADDING", (0, 0), (-1, -1), 8),
                     ("RIGHTPADDING", (0, 0), (-1, -1), 8),
                     ("LINEBELOW", (0, 0), (-1, -2), 0.25, RULE),
@@ -247,7 +248,7 @@ def money_block(
             stacked.append(quiet_table)
             continue
 
-        stacked.extend(_grand_tables(run, styles, block))
+        stacked.extend(_grand_tables(run, styles, block, scale))
 
     if not stacked:
         return Spacer(1, 0)
@@ -255,7 +256,9 @@ def money_block(
     return _wrap_money_block(stacked, width, block)
 
 
-def _grand_tables(rows: list[tuple[str, str]], styles: dict, block: float) -> list:
+def _grand_tables(
+    rows: list[tuple[str, str]], styles: dict, block: float, scale: float = 1.0
+) -> list:
     """The emphasised rows, one banded table each."""
     from reportlab.platypus import Paragraph
 
@@ -273,8 +276,8 @@ def _grand_tables(rows: list[tuple[str, str]], styles: dict, block: float) -> li
                 ("BACKGROUND", (0, 0), (-1, -1), BAND),
                 ("LINEABOVE", (0, 0), (-1, 0), 1.0, INK),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("TOPPADDING", (0, 0), (-1, -1), 9),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+                ("TOPPADDING", (0, 0), (-1, -1), 9 * scale),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 9 * scale),
                 ("LEFTPADDING", (0, 0), (-1, -1), 8),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 8),
             ])

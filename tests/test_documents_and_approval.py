@@ -132,6 +132,16 @@ def quotation(session, sales, admin, variant):
     return quote
 
 
+@pytest.fixture
+def carrier(session, admin):
+    from modules.models import ShippingLine
+
+    line = ShippingLine(name="Maersk", is_active=True)
+    session.add(line)
+    session.commit()
+    return line
+
+
 def _approve_and_issue(session, quotation, sales, manager):
     """Push a draft through submission and approval."""
     approval = approval_service.submit(session, quotation, sales)
@@ -973,3 +983,103 @@ class TestRevisions:
         with pytest.raises(ImmutableRecordError):
             session.commit()
         session.rollback()
+
+
+class TestOnePageAndOrdering:
+    """Two changes to how the quotation is laid out, both customer-visible."""
+
+    def test_a_short_quotation_comes_out_on_one_page(
+        self, session, sales, quotation
+    ):
+        """It spilled a signature block onto a second sheet.
+
+        A quotation that runs a few centimetres over is a worse document than
+        the same one set tighter: the reader turns the page for a signature
+        line and nothing else.
+        """
+        from pypdf import PdfReader
+
+        model = document_model.build_document(session, quotation)
+        pdf = pdf_generator.render(model)
+        assert len(PdfReader(BytesIO(pdf)).pages) == 1
+
+    def test_a_long_quotation_is_not_shrunk_to_no_purpose(
+        self, session, sales, quotation
+    ):
+        """Only a retry that reaches one page is used.
+
+        Forty lines were never going to fit, so shrinking the type would cost
+        legibility and buy nothing. The full-size render is returned instead.
+        """
+        for _ in range(40):
+            quotation_service.duplicate_line(
+                session, sales, quotation, quotation.items[0].id
+            )
+        session.commit()
+
+        from pypdf import PdfReader
+
+        model = document_model.build_document(session, quotation)
+        returned = len(PdfReader(BytesIO(pdf_generator.render(model))).pages)
+        _, at_full = pdf_generator._render_at(model, "A4", 1.0)
+        _, at_smallest = pdf_generator._render_at(model, "A4", 0.70)
+
+        # Compared by page count, not bytes: a PDF embeds a creation timestamp,
+        # so two renders of identical content are never byte-identical.
+        assert at_smallest < at_full, (
+            "the fixture is too small to distinguish the two renders"
+        )
+        assert returned == at_full, "a multi-page quotation was needlessly shrunk"
+
+    def test_the_shipping_terms_print_below_the_conditions(
+        self, session, sales, admin, quotation, carrier
+    ):
+        """Incoterms are conditions of sale, not a footnote to the total.
+
+        They sat between the total and the notes, separating the figure from
+        everything explaining it.
+        """
+        from pypdf import PdfReader
+
+        from modules import shipping_service
+        from modules.constants import ContainerSize
+
+        shipping_service.add_container(
+            session, admin, quotation, shipping_line_id=carrier.id,
+            container_size=ContainerSize.FORTY_FT_HC,
+            container_count=D("1"), freight_cost=D("4400"),
+        )
+        session.commit()
+
+        model = document_model.build_document(session, quotation)
+        text = "\n".join(
+            p.extract_text() or ""
+            for p in PdfReader(BytesIO(pdf_generator.render(model))).pages
+        )
+        terms_at = text.find("Terms and conditions")
+        incoterms_at = text.find("Incoterms")
+        assert terms_at != -1 and incoterms_at != -1
+        assert terms_at < incoterms_at, "the shipping summary is still above the terms"
+
+    def test_the_word_document_orders_them_the_same_way(
+        self, session, sales, admin, quotation, carrier
+    ):
+        """One model, two renderers; they must not disagree about order."""
+        from docx import Document as DocxDocument
+
+        from modules import shipping_service
+        from modules.constants import ContainerSize
+
+        shipping_service.add_container(
+            session, admin, quotation, shipping_line_id=carrier.id,
+            container_size=ContainerSize.FORTY_FT_HC,
+            container_count=D("1"), freight_cost=D("4400"),
+        )
+        session.commit()
+
+        model = document_model.build_document(session, quotation)
+        doc = DocxDocument(BytesIO(docx_generator.render(model)))
+        body = [p.text for p in doc.paragraphs]
+        terms_at = next(i for i, t in enumerate(body) if "Terms and conditions" in t)
+        incoterms_at = next(i for i, t in enumerate(body) if "Incoterms" in t)
+        assert terms_at < incoterms_at

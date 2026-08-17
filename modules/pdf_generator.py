@@ -67,20 +67,58 @@ COLUMN_WEIGHTS = {
 _styles = base_styles
 _escape = escape
 
+#: Scales tried, in order, to get a quotation onto one page.
+#:
+#: Only ever applied when it actually achieves that. A quotation with forty
+#: lines was never going to fit, and shrinking its type would make it harder to
+#: read for no gain — so a failed attempt is discarded and the full-size render
+#: is what gets returned.
+_FIT_SCALES = (0.94, 0.88, 0.82, 0.76, 0.70)
+
+#: Style attributes that are lengths and may be scaled. Colours, alignments and
+#: font names are left alone.
+_SCALABLE = ("fontSize", "leading", "spaceBefore", "spaceAfter")
+
+
+def _scaled_styles(scale: float = 1.0):  # noqa: ANN201
+    """The shared styles, optionally tightened.
+
+    ``base_styles`` builds fresh ParagraphStyle objects on every call, so
+    mutating them here cannot leak into the customer PDF renderer or a later
+    render at a different scale.
+    """
+    styles = _styles()
+    if scale == 1.0:
+        return styles
+    for style in styles.values():
+        for attribute in _SCALABLE:
+            value = getattr(style, attribute, None)
+            if value:
+                setattr(style, attribute, value * scale)
+    return styles
+
 
 class _QuotationTemplate(BaseDocTemplate):
     """Adds the repeating footer, page numbers and the DRAFT watermark."""
 
-    def __init__(self, buffer: BytesIO, document: QuotationDocument, page_size) -> None:  # noqa: ANN001
+    def __init__(
+        self,
+        buffer: BytesIO,
+        document: QuotationDocument,
+        page_size,  # noqa: ANN001
+        scale: float = 1.0,
+    ) -> None:
         self.document_model = document
-        self.styles = _styles()
+        self.styles = _scaled_styles(scale)
+        # The footer needs room whatever the scale, so the bottom margin gives
+        # back less than the rest.
         super().__init__(
             buffer,
             pagesize=page_size,
-            leftMargin=16 * mm,
-            rightMargin=16 * mm,
-            topMargin=14 * mm,
-            bottomMargin=18 * mm,
+            leftMargin=16 * mm * scale,
+            rightMargin=16 * mm * scale,
+            topMargin=14 * mm * scale,
+            bottomMargin=18 * mm * max(scale, 0.9),
             title=f"{document.quote_number} {document.revision_label}",
             author=document.company.name,
             subject="Quotation",
@@ -141,14 +179,14 @@ class _QuotationTemplate(BaseDocTemplate):
         canvas.restoreState()
 
 
-def _header_flowables(model: QuotationDocument, styles, width: float) -> list:  # noqa: ANN001
+def _header_flowables(model: QuotationDocument, styles, width: float, scale: float = 1.0) -> list:  # noqa: ANN001
     left: list = []
     if model.company.logo_bytes:
         try:
             logo = Image(BytesIO(model.company.logo_bytes))
             ratio = logo.imageHeight / float(logo.imageWidth or 1)
-            logo.drawWidth = 45 * mm
-            logo.drawHeight = 45 * mm * ratio
+            logo.drawWidth = 45 * mm * scale
+            logo.drawHeight = 45 * mm * scale * ratio
             left.append(logo)
             left.append(Spacer(1, 3))
         except Exception:  # noqa: BLE001 - a bad logo must not stop a quotation
@@ -190,10 +228,10 @@ def _header_flowables(model: QuotationDocument, styles, width: float) -> list:  
             ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
         ])
     )
-    return [table, Spacer(1, 10)]
+    return [table, Spacer(1, 10 * scale)]
 
 
-def _customer_flowables(model: QuotationDocument, styles, width: float) -> list:  # noqa: ANN001
+def _customer_flowables(model: QuotationDocument, styles, width: float, scale: float = 1.0) -> list:  # noqa: ANN001
     def block(label: str, value: str):  # noqa: ANN202
         return [
             Paragraph(label.upper(), styles["label"]),
@@ -236,16 +274,16 @@ def _customer_flowables(model: QuotationDocument, styles, width: float) -> list:
             TableStyle([
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("LEFTPADDING", (0, 0), (0, -1), 0),
-                ("TOPPADDING", (0, 0), (-1, -1), 2),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ("TOPPADDING", (0, 0), (-1, -1), 2 * scale),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6 * scale),
             ])
         )
         flowables.append(table)
-    flowables.append(Spacer(1, 4))
+    flowables.append(Spacer(1, 4 * scale))
     return flowables
 
 
-def _line_table(model: QuotationDocument, styles, width: float):  # noqa: ANN001
+def _line_table(model: QuotationDocument, styles, width: float, scale: float = 1.0):  # noqa: ANN001
     numeric = set(model.numeric_column_indexes)
 
     header = [
@@ -282,10 +320,14 @@ def _line_table(model: QuotationDocument, styles, width: float):  # noqa: ANN001
             ("LINEBELOW", (0, 0), (-1, 0), 0.6, RULE),
             ("LINEBELOW", (0, 1), (-1, -1), 0.25, RULE),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("TOPPADDING", (0, 0), (-1, -1), 8),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-            ("LEFTPADDING", (0, 0), (-1, -1), 7),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+            # Scaled with the type. Row padding is the single largest
+            # consumer of height on a short quotation -- 16pt a row before
+            # a word is set -- so a compact render that left it alone
+            # bought almost nothing.
+            ("TOPPADDING", (0, 0), (-1, -1), 8 * scale),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8 * scale),
+            ("LEFTPADDING", (0, 0), (-1, -1), 7 * scale),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 7 * scale),
         ])
     )
     return table
@@ -324,7 +366,7 @@ def _shipping_flowables(model: QuotationDocument, styles, width: float) -> list:
     return flowables
 
 
-def _totals_table(model: QuotationDocument, styles, width: float):  # noqa: ANN001
+def _totals_table(model: QuotationDocument, styles, width: float, scale: float = 1.0):  # noqa: ANN001
     """The money block, right-aligned, with the grand total carrying the weight.
 
     Delegates to the shared primitive so the customer PDF and this one place
@@ -332,11 +374,12 @@ def _totals_table(model: QuotationDocument, styles, width: float):  # noqa: ANN0
     there, which is invisible to a text-extraction test.
     """
     return money_block(
-        [(t.label, t.amount, t.emphasis) for t in model.totals], styles, width
+        [(t.label, t.amount, t.emphasis) for t in model.totals], styles, width,
+        scale,
     )
 
 
-def _signature_flowables(model: QuotationDocument, styles, width: float) -> list:  # noqa: ANN001
+def _signature_flowables(model: QuotationDocument, styles, width: float, scale: float = 1.0) -> list:  # noqa: ANN001
     cells = [
         [
             Paragraph("PREPARED BY", styles["label"]),
@@ -360,19 +403,19 @@ def _signature_flowables(model: QuotationDocument, styles, width: float) -> list
         TableStyle([
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("LEFTPADDING", (0, 0), (0, -1), 0),
-            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 4 * scale),
         ])
     )
 
-    flowables = [Spacer(1, 14), table]
+    flowables = [Spacer(1, 14 * scale), table]
 
     if model.show_acceptance_line:
         # A printed acceptance line only. There is deliberately no electronic
         # signature and nothing that links back to this application.
         flowables += [
-            Spacer(1, 16),
+            Spacer(1, 16 * scale),
             Paragraph("CUSTOMER ACCEPTANCE", styles["label"]),
-            Spacer(1, 14),
+            Spacer(1, 14 * scale),
             Table(
                 [[
                     Paragraph("Signature", styles["company_detail"]),
@@ -382,7 +425,7 @@ def _signature_flowables(model: QuotationDocument, styles, width: float) -> list
                 colWidths=[width / 3.0] * 3,
                 style=TableStyle([
                     ("LINEABOVE", (0, 0), (-1, 0), 0.5, INK),
-                    ("TOPPADDING", (0, 0), (-1, -1), 3),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3 * scale),
                     ("LEFTPADDING", (0, 0), (0, -1), 0),
                 ]),
             ),
@@ -391,25 +434,50 @@ def _signature_flowables(model: QuotationDocument, styles, width: float) -> list
 
 
 def render(document: QuotationDocument, page_size: str = "A4") -> bytes:
-    """Render the document and return the PDF bytes."""
+    """Render the document, on one page where one page is achievable.
+
+    A quotation that spills a few centimetres onto a second sheet is a worse
+    document than the same quotation set slightly tighter: the reader has to
+    turn over for a signature line. So the render is attempted at full size,
+    and only if that takes two pages is it retried at progressively tighter
+    scales — and only a retry that actually reaches one page is used.
+
+    A genuinely long quotation is left at full size and paginates as before.
+    Shrinking type on a document that was always going to run to three pages
+    buys nothing and costs legibility.
+    """
+    full, pages = _render_at(document, page_size, 1.0)
+    if pages <= 1:
+        return full
+
+    for scale in _FIT_SCALES:
+        attempt, attempt_pages = _render_at(document, page_size, scale)
+        if attempt_pages <= 1:
+            return attempt
+
+    return full
+
+
+def _render_at(
+    document: QuotationDocument, page_size: str, scale: float
+) -> tuple[bytes, int]:
+    """One render at one scale, with the page count it came to."""
     buffer = BytesIO()
     size = PAGE_SIZES.get((page_size or "A4").upper(), A4)
     # A wide column set does not fit portrait; rotating beats truncating.
     if len(document.columns) > 8:
         size = landscape(size)
 
-    template = _QuotationTemplate(buffer, document, size)
+    template = _QuotationTemplate(buffer, document, size, scale)
     styles = template.styles
     width = template.width
 
     story: list = []
-    story += _header_flowables(document, styles, width)
-    story += _customer_flowables(document, styles, width)
-    story.append(_line_table(document, styles, width))
-    story.append(Spacer(1, 8))
-    story.append(_totals_table(document, styles, width))
-
-    story += _shipping_flowables(document, styles, width)
+    story += _header_flowables(document, styles, width, scale)
+    story += _customer_flowables(document, styles, width, scale)
+    story.append(_line_table(document, styles, width, scale))
+    story.append(Spacer(1, 8 * scale))
+    story.append(_totals_table(document, styles, width, scale))
 
     if document.customer_notes:
         story.append(Paragraph("Notes", styles["section"]))
@@ -424,15 +492,21 @@ def render(document: QuotationDocument, page_size: str = "A4") -> bytes:
                 KeepTogether([
                     Paragraph(f"<b>{_escape(term.title)}</b>", styles["term"]),
                     Paragraph(_escape(term.body), styles["term"]),
-                    Spacer(1, 4),
+                    Spacer(1, 4 * scale),
                 ])
             )
 
-    story += _signature_flowables(document, styles, width)
+    # Below the terms, not above them. Incoterms, country of origin, loading
+    # and container count are trade terms: they belong with the conditions of
+    # sale rather than wedged between the total and the notes, where they
+    # separated the figure from everything explaining it.
+    story += _shipping_flowables(document, styles, width)
+
+    story += _signature_flowables(document, styles, width, scale)
 
     if document.thank_you_text:
-        story.append(Spacer(1, 12))
+        story.append(Spacer(1, 12 * scale))
         story.append(Paragraph(_escape(document.thank_you_text), styles["footer"]))
 
     template.build(story)
-    return buffer.getvalue()
+    return buffer.getvalue(), template.page

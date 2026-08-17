@@ -482,7 +482,6 @@ def render(document: CustomerPdfDocument, page_size: str = "A4") -> bytes:
     )
     story += _deposit(document, styles, width)
 
-    story += _shipping(document, styles, width)
 
     if document.customer_notes:
         story.append(Paragraph("Notes", styles["section"]))
@@ -511,6 +510,11 @@ def render(document: CustomerPdfDocument, page_size: str = "A4") -> bytes:
                     Spacer(1, 4),
                 ])
             )
+
+    # Below the terms, as on the internal quotation: incoterms and the
+    # container summary are conditions of sale, not a footnote to the
+    # total they were previously wedged against.
+    story += _shipping(document, styles, width)
 
     story += _signature(document, styles, width)
 
