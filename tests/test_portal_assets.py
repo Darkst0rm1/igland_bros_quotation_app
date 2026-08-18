@@ -309,6 +309,22 @@ class TestProductionStartupValidation:
         validate_portal_settings(Settings(app_env="development"))
 
     def _production(self, **kwargs):
+        """A production Settings built from *these* values and nothing else.
+
+        ``modules.config`` loads dotenv, so anything not named here is filled
+        from the developer's untracked ``.env``. That made this class's result
+        depend on a file no two machines share: switching ``EMAIL_ENABLED`` on
+        locally turned six passing tests red, because the environment supplied
+        a memory backend while the file supplied an enabled flag, and
+        production correctly refuses that pair.
+
+        The email fields are therefore pinned to a valid, inert combination.
+        These tests are about the portal base URL; what they must not do is
+        re-assert the email rules by accident, from whatever the machine
+        happens to hold.
+        """
+        kwargs.setdefault("email_enabled", False)
+        kwargs.setdefault("email_backend", "smtp")
         return Settings(
             app_env="production",
             secret_key="x" * 48,

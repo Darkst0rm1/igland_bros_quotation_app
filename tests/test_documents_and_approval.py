@@ -182,13 +182,24 @@ class TestDocumentModel:
         columns = document_model.DEFAULT_COLUMNS
         assert "board_quality" in columns
         assert "description" not in columns
-        assert columns.index("board_quality") < columns.index("size")
+
+        # The company's price list orders them product, depth, case, quality,
+        # and the quotation follows it so the two read side by side.
+        headings = document_model.AVAILABLE_COLUMNS
+        assert [headings[c] for c in columns[:5]] == [
+            "Item", "Product", "Depth", "Case", "Quality"
+        ]
+        # Flute is on the price list and deliberately not here.
+        assert "flute" not in columns
 
         model = document_model.build_document(session, quotation)
         values = model.lines[0].values
         assert values["board_quality"] == "WT110 HPFL115 KM135"
         assert values["size"] == '12" White'
         assert values["board_quality"] != values["size"]
+        assert values["depth"] == '2"'
+        # The heading says Case, so the cell is the count, not "50 / case".
+        assert values["pack_size"] == "50"
 
     def test_a_typed_description_and_the_remarks_still_reach_the_document(
         self, session, sales, quotation
@@ -462,7 +473,7 @@ class TestRenderers:
         reader = PdfReader(BytesIO(pdf_generator.render(model)))
         assert len(reader.pages) > 1
         # The table header repeats, so page two names its columns too.
-        assert "Board quality" in reader.pages[1].extract_text()
+        assert "Quality" in reader.pages[1].extract_text()
 
 
 class TestNoInternalDataLeaks:

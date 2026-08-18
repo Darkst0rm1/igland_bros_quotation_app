@@ -32,9 +32,12 @@ from modules.utilities import compose_spec_text, format_money, format_quantity
 AVAILABLE_COLUMNS: dict[str, str] = {
     "item": "Item",
     "description": "Description",
-    "size": "Size",
-    "board_quality": "Board quality",
-    "pack_size": "Pack size",
+    # Headed the way the company's own price list heads them, so a customer
+    # comparing the quotation against the list is reading the same words.
+    "size": "Product",
+    "depth": "Depth",
+    "board_quality": "Quality",
+    "pack_size": "Case",
     "moq": "MOQ",
     "quantity_packs": "Qty (packs)",
     "quantity_pieces": "Qty (pieces)",
@@ -45,29 +48,36 @@ AVAILABLE_COLUMNS: dict[str, str] = {
     "spec": "Specification",
 }
 
-#: ``containers`` sits directly after the quantity it is derived from: the
-#: customer reads "how many packs" and immediately "how many containers that
-#: fills", which is the question an export buyer actually asks. It renders as
-#: empty for any line without a container count, so a quotation that does not
-#: ship in containers simply shows a blank cell rather than a wrong number.
-#: Board quality before size, and no separate description column.
+#: The company's own price-list layout, plus the columns a quotation needs.
 #:
-#: "Description" printed ``description_override or size_label``, and almost no
-#: line carries an override — so the column repeated the size column beside it,
-#: on every quotation ever produced. Meanwhile the board quality was composed
-#: into a ``spec`` value that no default layout printed, which is the more
-#: expensive half: WTL125 FL120 IK120 and IK135 are different products at
-#: different prices on the same size, and a quotation that does not say which
-#: cannot be reconciled against the order it becomes.
+#: Product, depth, case, quality, price per pack, price per piece — the same
+#: order and the same headings the price list uses, so a customer can read the
+#: two side by side. **Flute is deliberately absent**: it is on the price list
+#: and was asked to be left off here.
+#:
+#: Quantity, containers and the line total have no equivalent on a price list
+#: and are added, because a quotation without them is not a quotation.
+#: ``containers`` sits directly after the quantity it is derived from — "how
+#: many packs", then "how many containers that fills", which is the question an
+#: export buyer actually asks — and renders empty rather than wrong for a line
+#: that has no container count.
+#:
+#: There is no "Description" column. It printed ``description_override or
+#: size_label`` and almost no line carries an override, so it repeated the
+#: product column beside it on every quotation ever produced. The board quality
+#: was meanwhile composed into a ``spec`` value that no default layout printed,
+#: which was the more expensive half: WTL125 FL120 IK120 and IK135 are
+#: different products at different prices on the same size, and a quotation
+#: that does not say which cannot be reconciled against the order it becomes.
 DEFAULT_COLUMNS = [
-    "item", "board_quality", "size", "pack_size",
+    "item", "size", "depth", "pack_size", "board_quality",
     "quantity_packs", "containers", "price_per_pack", "price_per_piece",
     "line_total",
 ]
 
 #: Columns whose values are numeric and should be right-aligned.
 NUMERIC_COLUMNS = frozenset({
-    "pack_size", "moq", "quantity_packs", "quantity_pieces", "containers",
+    "pack_size", "depth", "moq", "quantity_packs", "quantity_pieces", "containers",
     "price_per_pack", "price_per_piece", "line_total",
 })
 
@@ -390,7 +400,13 @@ def _line_values(  # noqa: ANN001
         "description": description,
         "size": size,
         "board_quality": item.board_quality or "",
-        "pack_size": f"{item.case_pack} / case" if item.case_pack else "",
+        # Depth as the price list writes it: 2" rather than 2.000.
+        "depth": f'{format_quantity(item.depth_in)}"' if item.depth_in else "",
+        # The heading is "Case", so the cell is the count. It read
+        # "50 / case" under a heading that already said case.
+        # ``case_pack`` is an int, not a Decimal — format_quantity would
+        # call normalize() on it.
+        "pack_size": f"{item.case_pack:,}" if item.case_pack else "",
         "moq": format_quantity(item.moq_packs) if item.moq_packs else "",
         "quantity_packs": format_quantity(item.quantity_packs),
         "quantity_pieces": format_quantity(item.quantity_pieces),
