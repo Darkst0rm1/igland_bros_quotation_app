@@ -30,6 +30,7 @@ from modules import (
     revision_service,
     settings_service,
     shipping_service,
+    wizard,
 )
 from modules.approval_service import ApprovalError
 from modules.audit_service import record_audit
@@ -424,14 +425,54 @@ with st.sidebar:
 # Tabs
 # --------------------------------------------------------------------------- #
 
-(
-    detail_tab, lines_tab, shipping_tab, charges_tab, terms_tab,
-    review_tab, tracking_tab
-) = st.tabs(
-    ["Details", f"Lines ({len(lines)})", f"Shipping ({container_row_count})",
-     f"Charges ({len(charges)})", f"Terms ({len(terms)})",
-     "Review & send", "Customer response"]
+# Not ``st.tabs``. A tab strip built by st.tabs cannot be moved from Python —
+# it takes no key and exposes no selection — and "Save & Continue" is exactly a
+# request to move it from Python. ``st.segmented_control`` carries its selection
+# in session state, so the footer can advance it while the strip stays clickable
+# for direct navigation.
+#
+# The second consequence is a quiet improvement: st.tabs executes every tab body
+# on every rerun and lets the browser hide six of them. Rendering one step means
+# one step's worth of queries.
+
+_step_key = wizard.step_state_key(quotation_id)
+
+# A move requested by the footer on the previous run. Applied here, before the
+# widget is instantiated: assigning to a widget's own key after it exists is an
+# error in Streamlit, so the footer parks its intent and this consumes it.
+_pending = st.session_state.pop(f"{_step_key}_pending", None)
+if _pending is not None:
+    st.session_state[_step_key] = wizard.resolve_step(_pending)
+
+st.session_state.setdefault(
+    _step_key, wizard.resolve_step(st.session_state.get(_step_key))
 )
+
+_STEP_COUNTS = {
+    "lines": len(lines),
+    "shipping": container_row_count,
+    "charges": len(charges),
+    "terms": len(terms),
+}
+
+
+def _step_label(key: str) -> str:
+    label = wizard.STEP_LABELS[key]
+    count = _STEP_COUNTS.get(key)
+    return f"{label} ({count})" if count is not None else label
+
+
+st.segmented_control(
+    "Step",
+    options=list(wizard.STEP_KEYS),
+    format_func=_step_label,
+    key=_step_key,
+    label_visibility="collapsed",
+)
+
+# resolve_step keeps a cleared selection — segmented_control returns None when
+# deselected — from blanking the page.
+_step = wizard.resolve_step(st.session_state.get(_step_key))
 
 
 def _save_header(**fields) -> None:
@@ -447,7 +488,7 @@ def _save_header(**fields) -> None:
         st.rerun()
 
 
-with detail_tab:
+if _step == "details":
     with st.form("quotation_header", border=False):
         col_a, col_b = st.columns(2)
         with col_a:
@@ -725,7 +766,7 @@ def _edit_line_dialog(line_id: int) -> None:
             st.rerun()
 
 
-with lines_tab:
+if _step == "lines":
     if lines:
         if st.session_state.pop("line_toast", None):
             st.toast("Line saved", icon="✅")
@@ -1061,7 +1102,7 @@ with lines_tab:
 # Container shipping & logistics
 # --------------------------------------------------------------------------- #
 
-with shipping_tab:
+if _step == "shipping":
     can_ship = user.has(Perm.SHIPMENT_EDIT) and editable
     can_see_freight = user.has(Perm.SHIPMENT_VIEW_FREIGHT)
     can_edit_freight = user.has(Perm.SHIPMENT_EDIT_FREIGHT) and editable
@@ -1671,7 +1712,7 @@ def _waiver_controls(charge: dict) -> None:
             _waiver_dialog(charge["id"], "request", label, amount)
 
 
-with charges_tab:
+if _step == "charges":
     if charges:
         # Columns rather than a dataframe, for the same reason as the lines
         # table: the waive control belongs on the charge it waives, and a
@@ -1831,7 +1872,7 @@ with charges_tab:
 # Terms
 # --------------------------------------------------------------------------- #
 
-with terms_tab:
+if _step == "terms":
     st.caption(
         "Terms are copied onto the quotation, so editing the wording here never "
         "changes the master template."
@@ -1886,7 +1927,7 @@ with terms_tab:
 # Review
 # --------------------------------------------------------------------------- #
 
-with review_tab:
+if _step == "review":
     total_a, total_b, total_c, total_d = st.columns(4)
     total_a.metric("Subtotal", format_money(header["subtotal"], ccy))
     total_b.metric("Charges", format_money(header["charges_total"], ccy))
@@ -2305,7 +2346,7 @@ with review_tab:
 # Customer response — recorded manually
 # --------------------------------------------------------------------------- #
 
-with tracking_tab:
+if _step == "tracking":
     st.caption(
         "Customers do not use this application. Everything here is recorded by an "
         "employee after sending the quotation — nothing is tracked automatically."
@@ -2382,3 +2423,111 @@ with tracking_tab:
             else:
                 st.toast("Response recorded", icon="✅")
                 st.rerun()
+
+
+# --------------------------------------------------------------------------- #
+# Step footer
+# --------------------------------------------------------------------------- #
+# Rendered last so it sits at the bottom of the document, and pinned so it stays
+# reachable without scrolling a long Lines or Shipping step to its end.
+#
+# The footer never writes to the database itself. Every save still goes through
+# the step's own form and quotation_service, which is what keeps locking,
+# approval and audit exactly where they already are — a second write path would
+# be a second place for those rules to be forgotten.
+
+st.markdown(
+    """
+    <style>
+      /* Clears Streamlit's own bottom padding so the bar does not float above
+         a gap, and leaves room so the last widget is never covered by it. */
+      section.main > div.block-container { padding-bottom: 6.5rem; }
+      div[data-testid="stVerticalBlock"] > div:has(> div.quotation-step-footer) {
+          position: sticky;
+          bottom: 0;
+          z-index: 99;
+          background: var(--background-color, #0e1117);
+          border-top: 1px solid rgba(250, 250, 250, 0.15);
+          padding: 0.6rem 0 0.35rem 0;
+      }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+with st.container():
+    st.markdown('<div class="quotation-step-footer"></div>', unsafe_allow_html=True)
+
+    _previous = wizard.previous_step(_step)
+    _next = wizard.next_step(_step)
+    _saving = st.session_state.get(wizard.saving_state_key(quotation_id), False)
+
+    _state = {
+        "header": header,
+        "lines": lines,
+        "incomplete_line_count": st.session_state.get(
+            f"incomplete_lines_{quotation_id}", 0
+        ),
+        # Only ADDED_SEPARATELY bills the customer for freight; INCLUDED and
+        # internal freight never become a charge. Containers only have to exist
+        # when there is freight to price against them.
+        "freight_charged": (
+            shipment is not None
+            and shipment["freight_method"] is FreightMethod.ADDED_SEPARATELY
+        ),
+        "container_count": container_row_count,
+    }
+    _problems = wizard.validate(_step, _state)
+
+    _back_col, _spacer, _status_col, _action_col = st.columns([1, 3, 2, 2])
+
+    with _back_col:
+        if st.button(
+            "← Back", disabled=_previous is None, use_container_width=True,
+            key=f"wiz_back_{quotation_id}",
+        ):
+            st.session_state[f"{_step_key}_pending"] = _previous
+            st.rerun()
+
+    with _status_col:
+        if _problems:
+            st.caption(f"⚠️ {_problems[0]}")
+        elif not editable:
+            st.caption("🔒 Locked — read only")
+
+    with _action_col:
+        if wizard.is_last(_step):
+            # The send action already exists on the Review step, with its own
+            # confirmations. Duplicating it here would be a second way to send.
+            st.caption("Use **Send to customer** above.")
+        elif not editable:
+            if st.button(
+                "Next →", disabled=_next is None, use_container_width=True,
+                key=f"wiz_next_ro_{quotation_id}",
+            ):
+                st.session_state[f"{_step_key}_pending"] = _next
+                st.rerun()
+        else:
+            # Labelled "Continue", not "Save & Continue", and it raises no
+            # "Saved" toast — because it does not yet save. Each step's fields
+            # live inside their own st.form, and a button outside a form cannot
+            # submit it; until those fields move out of their forms, this
+            # advances the step and nothing more. Claiming a save here would
+            # teach people their work is safe at exactly the moment it is not,
+            # which is worse than the button being honestly incomplete.
+            if st.button(
+                "Continue →",
+                type="primary",
+                use_container_width=True,
+                disabled=bool(_problems) or _saving or _next is None,
+                key=f"wiz_continue_{quotation_id}",
+            ):
+                # Held across the rerun the click causes, so a second click
+                # while the first is still in flight finds the button disabled.
+                st.session_state[wizard.saving_state_key(quotation_id)] = True
+                st.session_state[f"{_step_key}_pending"] = _next
+                st.rerun()
+
+# Cleared once the next run has drawn the button again.
+if st.session_state.get(wizard.saving_state_key(quotation_id)):
+    st.session_state[wizard.saving_state_key(quotation_id)] = False

@@ -350,6 +350,26 @@ class TestQuotationPages:
             app.session_state[key] = value
         return app.run()
 
+    def _open_step(self, session, priced_quotation, step: str):  # noqa: ANN001
+        """Open the quotation page with one wizard step selected.
+
+        Only the active step renders now — the strip is a segmented control, not
+        st.tabs, because st.tabs cannot be moved from Python and Save & Continue
+        has to move it. So a test that reads the Lines step has to ask for it;
+        previously every tab body rendered on every run and the browser hid the
+        rest.
+        """
+        from modules import wizard
+
+        quotation_id = priced_quotation["quotation_id"]
+        return self._run_page(
+            "pages/02_Create_Quotation.py",
+            session,
+            priced_quotation["admin_row"],
+            active_quotation_id=quotation_id,
+            **{wizard.step_state_key(quotation_id): step},
+        )
+
     @pytest.fixture
     def priced_quotation(self, session, make_user):
         """A customer, a priced variant and a saved draft with one line."""
@@ -421,6 +441,72 @@ class TestQuotationPages:
         )
         assert "no customers yet" in _text(app)
 
+    # --- step navigation ------------------------------------------------- #
+
+    def test_only_the_selected_step_renders(self, session, priced_quotation):
+        """The point of the segmented control over st.tabs.
+
+        st.tabs runs every tab body on every rerun and lets the browser hide the
+        rest. This renders one, so work the user cannot see is work not done.
+        """
+        on_lines = _text(self._open_step(session, priced_quotation, "lines"))
+        on_details = _text(self._open_step(session, priced_quotation, "details"))
+
+        assert "Add a product" in on_lines
+        assert "Add a product" not in on_details
+
+    def test_the_footer_offers_back_and_continue(self, session, priced_quotation):
+        app = self._open_step(session, priced_quotation, "lines")
+        assert not app.exception, app.exception
+        labels = [b.label for b in app.button]
+        assert "← Back" in labels
+        # "Continue", not "Save & Continue": the footer does not save yet, and
+        # the label is not allowed to promise more than the button does.
+        assert any("Continue" in label for label in labels)
+
+    def test_back_is_disabled_on_the_first_step(self, session, priced_quotation):
+        """There is nowhere behind Details."""
+        app = self._open_step(session, priced_quotation, "details")
+        assert not app.exception, app.exception
+        back = [b for b in app.button if b.label == "← Back"]
+        assert back and back[0].disabled is True
+
+    def test_the_last_step_does_not_offer_continue(self, session, priced_quotation):
+        """Review already carries the send action, with its own confirmations.
+        A second one in the footer would be a second way to send."""
+        app = self._open_step(session, priced_quotation, "review")
+        assert not app.exception, app.exception
+        assert not any("Continue" in b.label for b in app.button)
+
+    def test_continue_moves_to_the_next_step(self, session, priced_quotation):
+        from modules import wizard
+
+        quotation_id = priced_quotation["quotation_id"]
+        app = self._open_step(session, priced_quotation, "details")
+        assert not app.exception, app.exception
+
+        button = [b for b in app.button if "Continue" in b.label]
+        assert button, "no continue button on the details step"
+        button[0].click().run()
+
+        assert app.session_state[wizard.step_state_key(quotation_id)] == "lines"
+
+    def test_back_moves_to_the_previous_step(self, session, priced_quotation):
+        from modules import wizard
+
+        quotation_id = priced_quotation["quotation_id"]
+        app = self._open_step(session, priced_quotation, "shipping")
+        assert not app.exception, app.exception
+
+        [b for b in app.button if b.label == "← Back"][0].click().run()
+        assert app.session_state[wizard.step_state_key(quotation_id)] == "lines"
+
+    def test_a_stale_step_key_does_not_break_the_page(self, session, priced_quotation):
+        """A renamed step must land on Details, not raise on a page the user
+        did nothing wrong to reach."""
+        app = self._open_step(session, priced_quotation, "a_step_that_was_renamed")
+        assert not app.exception, app.exception
+
     def test_an_existing_quotation_opens_with_its_totals(
         self, session, priced_quotation
     ):
@@ -441,12 +527,7 @@ class TestQuotationPages:
         operator clicks; ``st.dataframe`` cannot hold one, which is why the
         table is drawn as columns.
         """
-        app = self._run_page(
-            "pages/02_Create_Quotation.py",
-            session,
-            priced_quotation["admin_row"],
-            active_quotation_id=priced_quotation["quotation_id"],
-        )
+        app = self._open_step(session, priced_quotation, "lines")
         assert not app.exception, app.exception
         labels = [b.label for b in app.button]
         assert "✏️" in labels, "no edit button on the line"
@@ -460,12 +541,7 @@ class TestQuotationPages:
         further down the page would be two ways to do one thing — and the one
         people found first was the one that made them scroll.
         """
-        app = self._run_page(
-            "pages/02_Create_Quotation.py",
-            session,
-            priced_quotation["admin_row"],
-            active_quotation_id=priced_quotation["quotation_id"],
-        )
+        app = self._open_step(session, priced_quotation, "lines")
         assert not app.exception, app.exception
         text = _text(app)
         assert "Change a line" not in text
