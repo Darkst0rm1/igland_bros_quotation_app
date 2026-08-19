@@ -33,7 +33,12 @@ from modules import (
     quote_send_service,
 )
 from modules.authorization import PermissionDenied, quotation_scope_filter
-from modules.config import get_settings
+from modules.config import (
+    database_identity,
+    delivery_status,
+    get_settings,
+    secrets_status,
+)
 from modules.constants import (
     DOCUMENT_JOB_DISPLAY_NAMES,
     EMAIL_MESSAGE_DISPLAY_NAMES,
@@ -487,6 +492,23 @@ if user.has(Perm.QUOTE_PORTAL_SEND):
         st.warning(escape_markdown(f"**{warning.label}.** {warning.detail}"))
     if eligibility.may_send and not eligibility.warnings:
         st.success("Ready to send.")
+
+    # Administrators only, and only when delivery is the thing standing in the
+    # way. "Email delivery is switched off" is indistinguishable, from this
+    # screen, between *nobody has enabled it* and *it is enabled in the panel but
+    # never reached this process* — the second is what happened here, and from
+    # the outside the two look identical. Presence and verdicts only; nothing
+    # rendered below is a secret.
+    if user.is_admin and any(b.code == "email_disabled" for b in eligibility.blockers):
+        with st.expander("Why is delivery switched off?"):
+            st.caption(
+                "What this process actually loaded. Names and status only — no "
+                "values. Safe to screenshot."
+            )
+            status = delivery_status()
+            st.table({"Setting": list(status), "Status": list(status.values())})
+            st.caption(f"Database: `{database_identity()}`")
+            st.caption(f"Secrets: `{secrets_status()}`")
 
     # --- confirm and send --------------------------------------------------- #
     st.markdown("**5. Send**")

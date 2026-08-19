@@ -80,6 +80,72 @@ def secrets_status() -> str:
     return _SECRETS_STATUS
 
 
+def database_kind() -> str:
+    """Which *sort* of database this process reached. No host, no name.
+
+    For the startup failure screen, which renders before anyone has signed in —
+    it is the first thing an unauthenticated visitor sees when configuration is
+    wrong. That screen has to answer one question, "did DATABASE_URL arrive at
+    all, or are we on the SQLite fallback", and answering it does not require
+    naming the server.
+    """
+    from sqlalchemy.engine import make_url
+
+    try:
+        url = make_url(get_settings().database_url)
+    except Exception:  # noqa: BLE001
+        return "unreadable"
+    if url.drivername.startswith("sqlite"):
+        return "sqlite — the local fallback, not a configured database"
+    return f"{url.drivername} (a configured server)"
+
+
+def database_identity() -> str:
+    """Which database this process is talking to, without credentials.
+
+    Driver, host and database name — never the user, the password or the query
+    string. Naming the host is what lets an administrator confirm the employee
+    app and the Render worker share one database, which is the whole reason this
+    exists; ``database_kind`` is the version for anywhere less privileged.
+
+    ADMINISTRATORS ONLY. The single caller is the SYS_ADMIN diagnostic.
+    """
+    from sqlalchemy.engine import make_url
+
+    try:
+        url = make_url(get_settings().database_url)
+    except Exception:  # noqa: BLE001
+        return "unreadable"
+    if url.drivername.startswith("sqlite"):
+        return f"sqlite (file: {url.database or ':memory:'})"
+    return f"{url.drivername} on {url.host or '?'}/{url.database or '?'}"
+
+
+def delivery_status() -> dict[str, str]:
+    """Whether outbound email is configured, as presence and never as content.
+
+    Every entry is a verdict — "on", "set", "missing" — derived from a value but
+    never containing one. Safe to render in the UI, screenshot and paste into a
+    ticket, which is the point: the failure this exists for is a setting that
+    looks present in the panel and never arrives, and diagnosing that from the
+    outside otherwise means reading secrets aloud.
+    """
+    s = get_settings()
+    mark = lambda present: "set" if present else "missing"  # noqa: E731
+    return {
+        "EMAIL_ENABLED": "on" if s.email_enabled else "OFF",
+        "EMAIL_BACKEND": s.email_backend,
+        "EMAIL_FROM_ADDRESS": mark(s.email_from_address),
+        "EMAIL_REPLY_TO": mark(s.email_reply_to),
+        "SMTP_HOST": mark(s.smtp_host),
+        "SMTP_PORT": str(s.smtp_port),
+        "SMTP_SECURITY": s.smtp_security,
+        "SMTP_USERNAME": mark(s.smtp_username),
+        "SMTP_PASSWORD": mark(s.smtp_password),
+        "EMAIL_PAYLOAD_KEYS": mark(s.email_payload_keys),
+    }
+
+
 class Settings(BaseSettings):
     """Typed application settings.
 
@@ -386,7 +452,18 @@ def get_settings() -> Settings:
     Cached because Streamlit re-runs the whole script on every interaction and
     re-parsing configuration each time would be wasteful.
     """
-    settings = Settings(**_streamlit_secrets())
+    # Lowercased deliberately. ``case_sensitive=False`` governs the *environment*
+    # source only; keyword arguments are matched against field names exactly, and
+    # ``extra="ignore"`` then drops anything that does not match — silently. A
+    # secrets panel written in the documented UPPERCASE style therefore reached
+    # this call and was discarded in full.
+    #
+    # It went unnoticed because Streamlit also promotes secrets to os.environ,
+    # where the case-insensitive environment source picks them up — but only for
+    # str/int/float. Booleans are excluded there on purpose, so EMAIL_ENABLED was
+    # the one setting with no second path in, and fell back to its default False
+    # while every neighbouring string setting worked.
+    settings = Settings(**{k.lower(): v for k, v in _streamlit_secrets().items()})
     logging.basicConfig(
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",

@@ -29,7 +29,7 @@ from modules.authentication import (
     change_password,
     logout,
 )
-from modules.config import get_settings, secrets_status
+from modules.config import database_kind, get_settings, secrets_status
 from modules.constants import Perm
 from modules.database import reset_engine_cache, schema_revisions, session_scope
 from modules.session import (
@@ -52,25 +52,6 @@ st.set_page_config(
 # --------------------------------------------------------------------------- #
 # Startup checks
 # --------------------------------------------------------------------------- #
-
-def _database_identity() -> str:
-    """Which database this process is actually talking to, without credentials.
-
-    Printed on the failure screen. Without it, "the database has no schema" is
-    ambiguous between *the configured database is empty* and *no configuration
-    was found, so it fell back to SQLite* — which look identical from the
-    outside and have completely different fixes.
-    """
-    from sqlalchemy.engine import make_url
-
-    try:
-        url = make_url(get_settings().database_url)
-    except Exception:  # noqa: BLE001
-        return "unreadable"
-    if url.drivername.startswith("sqlite"):
-        return f"sqlite (file: {url.database or ':memory:'})"
-    return f"{url.drivername} on {url.host or '?'}/{url.database or '?'}"
-
 
 def _sync_permissions() -> None:
     """Reconcile the database's permissions with this code's, once per process.
@@ -146,7 +127,7 @@ def _startup_check() -> tuple[bool, str | None]:
 
     settings = get_settings()
     applied, expected = schema_revisions()
-    where = _database_identity()
+    where = database_kind()
 
     problem: str | None = None
     if applied is None:
@@ -154,7 +135,7 @@ def _startup_check() -> tuple[bool, str | None]:
             f"The database has no schema yet.\n\n"
             f"**Connected to:** `{where}`\n\n"
             f"**Secrets:** `{secrets_status()}`\n\n"
-            "If the database above is not the one you expect, the `DATABASE_URL` "
+            "If that is not the database you expect, the `DATABASE_URL` "
             "secret is not reaching the application — the Secrets line tells you "
             "what was actually found. Otherwise apply the migrations:\n\n"
             "```\nalembic upgrade head\npython -m seeds.bootstrap\n```"
