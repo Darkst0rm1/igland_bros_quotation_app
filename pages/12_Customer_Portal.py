@@ -33,12 +33,7 @@ from modules import (
     quote_send_service,
 )
 from modules.authorization import PermissionDenied, quotation_scope_filter
-from modules.config import (
-    database_identity,
-    delivery_status,
-    get_settings,
-    secrets_status,
-)
+from modules.config import get_settings
 from modules.constants import (
     DOCUMENT_JOB_DISPLAY_NAMES,
     EMAIL_MESSAGE_DISPLAY_NAMES,
@@ -501,14 +496,31 @@ if user.has(Perm.QUOTE_PORTAL_SEND):
     # rendered below is a secret.
     if user.is_admin and any(b.code == "email_disabled" for b in eligibility.blockers):
         with st.expander("Why is delivery switched off?"):
-            st.caption(
-                "What this process actually loaded. Names and status only — no "
-                "values. Safe to screenshot."
-            )
-            status = delivery_status()
-            st.table({"Setting": list(status), "Status": list(status.values())})
-            st.caption(f"Database: `{database_identity()}`")
-            st.caption(f"Secrets: `{secrets_status()}`")
+            # Imported here, not at module scope. A page that fails to import
+            # takes itself out of the application entirely, and this one is the
+            # send screen — losing it to a diagnostic would cost far more than
+            # the diagnostic is worth. On a half-applied deploy the panel simply
+            # says so instead.
+            try:
+                from modules.config import (
+                    database_identity,
+                    delivery_status,
+                    secrets_status,
+                )
+            except ImportError:
+                st.caption(
+                    "Diagnostic unavailable — this process is running an older "
+                    "modules/config.py than the page. Reboot the app."
+                )
+            else:
+                st.caption(
+                    "What this process actually loaded. Names and status only — "
+                    "no values. Safe to screenshot."
+                )
+                status = delivery_status()
+                st.table({"Setting": list(status), "Status": list(status.values())})
+                st.caption(f"Database: `{database_identity()}`")
+                st.caption(f"Secrets: `{secrets_status()}`")
 
     # --- confirm and send --------------------------------------------------- #
     st.markdown("**5. Send**")

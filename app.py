@@ -29,7 +29,7 @@ from modules.authentication import (
     change_password,
     logout,
 )
-from modules.config import database_kind, get_settings, secrets_status
+from modules.config import get_settings, secrets_status
 from modules.constants import Perm
 from modules.database import reset_engine_cache, schema_revisions, session_scope
 from modules.session import (
@@ -52,6 +52,28 @@ st.set_page_config(
 # --------------------------------------------------------------------------- #
 # Startup checks
 # --------------------------------------------------------------------------- #
+
+def _database_kind() -> str:
+    """Which *sort* of database this process reached. No host, no name.
+
+    Defined here rather than imported from modules.config, and deliberately so.
+    This screen is the one that renders when configuration is broken, which is
+    exactly when the deployment is most likely to be half-applied — Streamlit
+    re-runs a freshly pulled app.py against modules it has already imported, so
+    a name added to config.py in the same commit may not exist yet at this line.
+    An ImportError here takes the whole application down and replaces a
+    diagnostic screen with a stack trace. It has no dependencies for that reason.
+    """
+    from sqlalchemy.engine import make_url
+
+    try:
+        url = make_url(get_settings().database_url)
+    except Exception:  # noqa: BLE001
+        return "unreadable"
+    if url.drivername.startswith("sqlite"):
+        return "sqlite — the local fallback, not a configured database"
+    return f"{url.drivername} (a configured server)"
+
 
 def _sync_permissions() -> None:
     """Reconcile the database's permissions with this code's, once per process.
@@ -127,7 +149,7 @@ def _startup_check() -> tuple[bool, str | None]:
 
     settings = get_settings()
     applied, expected = schema_revisions()
-    where = database_kind()
+    where = _database_kind()
 
     problem: str | None = None
     if applied is None:
