@@ -20,6 +20,22 @@ _CURRENCY_SYMBOLS = {
     "USD": "$", "CAD": "$", "EUR": "€", "GBP": "£", "TRY": "₺",
 }
 
+#: Display format for every editable numeric field. Purely presentational —
+#: ``st.number_input`` formats what it shows and hands back the same float
+#: either way, so nothing stored or calculated passes through this.
+#:
+#: ``%g`` drops trailing zeros, which is the whole point: a discount of zero
+#: reads "0" rather than "0.00", a price of 7.85 keeps two places, and 7.8565
+#: keeps four. A fixed "%.4f" cannot do that — it pads every value to the
+#: longest one any value might need.
+#:
+#: The precision is 10, not the default 6, because %g falls back to scientific
+#: notation once a number exceeds its significant digits: plain "%g" renders
+#: 1234567 as "1.23457e+06", which is indefensible in a quantity field. Ten
+#: digits covers every quantity and price this application deals in while still
+#: dropping the zeros.
+NUMBER_FORMAT = "%.10g"
+
 
 def format_money(
     value: Decimal | None, currency: str = "USD", *, decimals: int = 2, blank: str = "-"

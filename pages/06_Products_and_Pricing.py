@@ -42,6 +42,7 @@ from modules.repositories import (
 )
 from modules.session import page_header, require_page
 from modules.utilities import (
+    NUMBER_FORMAT,
     empty_frame,
     format_date,
     format_money,
@@ -282,7 +283,7 @@ with catalogue_tab:
                         min_value=0.0,
                         step=0.25,
                         value=float(target["depth_in"]) if target and target["depth_in"] else 0.0,
-                    )
+                     format=NUMBER_FORMAT)
                     flute = st.text_input(
                         "Flute", value=target["flute"] if target else "B"
                     )
@@ -646,13 +647,13 @@ with pricing_tab:
                     )
                 with col_b:
                     pack_price = st.number_input(
-                        "Price per pack", min_value=0.0, step=0.01, format="%.4f"
+                        "Price per pack", min_value=0.0, step=0.01, format=NUMBER_FORMAT
                     )
                     piece_price = st.number_input(
                         "Price per piece (0 to derive)",
                         min_value=0.0,
                         step=0.0001,
-                        format="%.4f",
+                        format=NUMBER_FORMAT,
                         help=(
                             "Leave at 0 to derive it from the pack price. Enter a value "
                             "when the price list states one — the two columns are "
@@ -698,7 +699,7 @@ with pricing_tab:
                 cost_a, cost_b, cost_c = st.columns(3)
                 with cost_a:
                     cost_pack = st.number_input(
-                        "Cost per pack", min_value=0.0, step=0.01, format="%.4f"
+                        "Cost per pack", min_value=0.0, step=0.01, format=NUMBER_FORMAT
                     )
                 with cost_b:
                     cost_currency = st.selectbox(
@@ -795,8 +796,7 @@ with tiers_tab:
                     help=(
                         "Quoting fewer containers than this raises a warning. It never "
                         "changes the selected tier."
-                    ),
-                )
+                    ))
                 tier_requires_approval = st.checkbox(
                     "Using this tier requires approval", value=bool(row[3])
                 )

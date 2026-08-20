@@ -80,6 +80,7 @@ from modules.repositories import (
 )
 from modules.session import page_header, require_page
 from modules.utilities import (
+    NUMBER_FORMAT,
     escape_markdown,
     format_date,
     format_datetime,
@@ -572,13 +573,13 @@ if _step == "details":
                 min_value=0.0, max_value=100.0, step=0.5,
                 value=float(header["quote_discount_pct"] or 0),
                 disabled=not editable,
-            )
+             format=NUMBER_FORMAT)
             tax_pct = st.number_input(
                 "Tax %",
                 min_value=0.0, max_value=100.0, step=0.5,
                 value=float(header["tax_rate_pct"] or 0),
                 disabled=not editable,
-            )
+             format=NUMBER_FORMAT)
 
         st.markdown("###### Contact and addresses")
         contact_a, contact_b = st.columns(2)
@@ -744,7 +745,7 @@ def _edit_line_dialog(line_id: int) -> None:
         packs = st.number_input(
             "Quantity (packs)", min_value=0.0, step=50.0,
             value=current["quantity_packs"], key=f"dlg_packs_{line_id}",
-        )
+         format=NUMBER_FORMAT)
         containers = st.number_input(
             "Containers", min_value=0.0, step=1.0,
             value=current["container_count"], key=f"dlg_ctnrs_{line_id}",
@@ -753,11 +754,11 @@ def _edit_line_dialog(line_id: int) -> None:
                 "quantity. A figure here is your own statement of the "
                 "shipment and overrides that everywhere."
             ),
-        )
+         format=NUMBER_FORMAT)
         discount = st.number_input(
             "Line discount %", min_value=0.0, max_value=100.0, step=0.5,
             value=current["line_discount_pct"], key=f"dlg_disc_{line_id}",
-        )
+         format=NUMBER_FORMAT)
     with col_b:
         tier_codes = [c for c, _ in tiers]
         tier_code = st.selectbox(
@@ -782,7 +783,7 @@ def _edit_line_dialog(line_id: int) -> None:
         price_col, reason_col = st.columns(2)
         with price_col:
             custom_price = st.number_input(
-                "Custom price per pack", min_value=0.0, step=0.01, format="%.4f",
+                "Custom price per pack", min_value=0.0, step=0.01, format=NUMBER_FORMAT,
                 value=float(current["price_per_pack"]),
                 key=f"dlg_price_{line_id}",
             )
@@ -1060,7 +1061,7 @@ if _step == "lines":
                     "order quantity — one full container. Change it freely; a "
                     "smaller quantity is quoted with a warning, not refused."
                 ),
-            )
+             format=NUMBER_FORMAT)
             packs = pieces / case_pack
 
             suggested_containers = 0.0
@@ -1126,7 +1127,7 @@ if _step == "lines":
                             "what you enter is treated as your own statement of "
                             "the shipment and takes precedence everywhere."
                         ),
-                    )
+                     format=NUMBER_FORMAT)
                     if suggested_containers:
                         st.caption(
                             f"{format_quantity(Decimal(str(packs)))} packs ÷ "
@@ -1139,11 +1140,12 @@ if _step == "lines":
                         )
                 with form_c:
                     discount = st.number_input(
-                        "Line discount %", min_value=0.0, max_value=100.0, step=0.5, value=0.0
+                        "Line discount %", min_value=0.0, max_value=100.0,
+                        step=0.5, value=0.0, format=NUMBER_FORMAT,
                     )
                     custom_price = st.number_input(
                         "Custom price per pack",
-                        min_value=0.0, step=0.01, format="%.4f", value=0.0,
+                        min_value=0.0, step=0.01, format=NUMBER_FORMAT, value=0.0,
                         help="Only used when the Custom tier is selected.",
                     )
                 custom_reason = st.text_input(
@@ -1317,7 +1319,7 @@ if _step == "shipping":
                     )
                     freight_cost = st.number_input(
                         "Freight cost per container",
-                        min_value=0.0, step=100.0, format="%.2f", value=0.0,
+                        min_value=0.0, step=100.0, format=NUMBER_FORMAT, value=0.0,
                         disabled=not can_edit_freight,
                         help=(
                             None if can_edit_freight
@@ -1393,11 +1395,10 @@ if _step == "shipping":
             new_count = st.number_input(
                 "Number of containers", min_value=1,
                 value=int(picked_container["container_count"]), step=1,
-                key="edit_container_count",
-            )
+                key="edit_container_count")
         with act_b:
             new_freight = st.number_input(
-                "Freight per container", min_value=0.0, step=100.0, format="%.2f",
+                "Freight per container", min_value=0.0, step=100.0, format=NUMBER_FORMAT,
                 value=float(picked_container["freight_cost"]),
                 disabled=not can_edit_freight, key="edit_container_freight",
             )
@@ -1405,8 +1406,7 @@ if _step == "shipping":
             new_transit = st.number_input(
                 "Transit days", min_value=0,
                 value=int(picked_container["transit_days"] or 0), step=1,
-                key="edit_container_transit",
-            )
+                key="edit_container_transit")
 
         button_a, button_b, button_c = st.columns(3)
         with button_a:
@@ -1502,7 +1502,7 @@ if _step == "shipping":
                         "bundles-per-container for this product, because this "
                         "line has no container count of its own to divide by."
                     ),
-                )
+                 format=NUMBER_FORMAT)
             if st.button("Assign to container"):
                 try:
                     with session_scope() as db:
@@ -1922,10 +1922,10 @@ if _step == "charges":
                 description = st.text_input("Description")
                 c_a, c_b = st.columns(2)
                 with c_a:
-                    quantity = st.number_input("Quantity", min_value=0.0, value=1.0)
+                    quantity = st.number_input("Quantity", min_value=0.0, value=1.0, format=NUMBER_FORMAT)
                 with c_b:
                     charge_rate = st.number_input(
-                        "Rate", min_value=0.0, step=0.01, format="%.2f", value=0.0
+                        "Rate", min_value=0.0, step=0.01, format=NUMBER_FORMAT, value=0.0
                     )
                 taxable = st.checkbox("Taxable", value=True)
                 visible = st.checkbox(

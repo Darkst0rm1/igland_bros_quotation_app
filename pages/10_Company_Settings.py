@@ -30,6 +30,7 @@ from modules.constants import (
     Perm,
 )
 from modules.database import session_scope
+from modules.utilities import NUMBER_FORMAT
 from modules.document_model import AVAILABLE_COLUMNS, DEFAULT_COLUMNS
 from modules.numbering import NumberFormatError, render, validate_format
 from modules.session import page_header, require_page
@@ -318,7 +319,7 @@ with document_tab:
             )
             plate_rate = st.number_input(
                 "Printing-plate rate (per size per colour)",
-                min_value=0.0, step=10.0, format="%.2f",
+                min_value=0.0, step=10.0, format=NUMBER_FORMAT,
                 value=float(current["printing_plate_rate"]),
             )
             plate_currency = st.selectbox(
@@ -423,7 +424,7 @@ with thresholds_tab:
         )
         tolerance = st.number_input(
             "Piece / pack price tolerance",
-            min_value=0.0, max_value=1.0, step=0.0001, format="%.4f",
+            min_value=0.0, max_value=1.0, step=0.0001, format=NUMBER_FORMAT,
             value=float(tunables["piece_pack_tolerance"]),
             help=(
                 "How far a piece price may differ from pack ÷ case pack before it is "
@@ -442,7 +443,7 @@ with thresholds_tab:
             min_value=0.0, max_value=100.0, step=1.0,
             value=float(tunables["max_custom_discount_pct"]),
             help="Beyond this, the line raises a blocking warning and needs approval.",
-        )
+         format=NUMBER_FORMAT)
         thresholds_saved = st.form_submit_button("Save thresholds", type="primary")
 
     if thresholds_saved:
@@ -540,8 +541,7 @@ with shipping_tab:
                     edit_name = st.text_input("Name", value=target["name"])
                     edit_order = st.number_input(
                         "Display order", min_value=0, max_value=999,
-                        value=int(target["sort_order"]), step=10,
-                    )
+                        value=int(target["sort_order"]), step=10)
                     edit_active = st.checkbox(
                         "Offered when building a container",
                         value=target["is_active"],
