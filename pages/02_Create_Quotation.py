@@ -475,6 +475,38 @@ st.segmented_control(
 # deselected — from blanking the page.
 _step = wizard.resolve_step(st.session_state.get(_step_key))
 
+#: Steps whose fields sit in an st.form, so edits exist that this page cannot
+#: see until the form is submitted. Declared here because leaving one — by any
+#: route — is what has to be guarded.
+_STEPS_THAT_SAVE = {"details", "shipping"}
+
+_last_step_key = f"wizard_last_{quotation_id}"
+_confirm_key = f"wiz_confirm_leave_{quotation_id}"
+_confirm_target_key = f"wiz_confirm_target_{quotation_id}"
+
+# Clicking the strip is a way of leaving a step, and it has to be guarded like
+# any other. The footer's Back button asks before discarding; without this, the
+# tab strip immediately beside it would walk away from the same unsaved edits
+# without a word, which is the worse of the two because it looks like navigation
+# rather than a decision.
+_left_behind = st.session_state.get(_last_step_key)
+if (
+    _left_behind is not None
+    and _left_behind != _step
+    and _left_behind in _STEPS_THAT_SAVE
+    and editable
+    and _pending is None  # a move the page itself made, already past its save
+    and not st.session_state.get(_confirm_key)
+):
+    # Put the strip back where it was and ask. The revert goes through the
+    # pending slot because assigning to a live widget's key is an error.
+    st.session_state[f"{_step_key}_pending"] = _left_behind
+    st.session_state[_confirm_key] = True
+    st.session_state[_confirm_target_key] = _step
+    st.rerun()
+
+st.session_state[_last_step_key] = _step
+
 
 def _advance_from(step: str) -> None:
     """Queue the move to the next step. Only ever called after a commit."""
@@ -2502,8 +2534,6 @@ if _step == "tracking":
 # going forward when there is nothing to save, and saying why a step is blocked.
 # It never writes to the database.
 
-_STEPS_THAT_SAVE = {"details", "shipping"}
-
 st.markdown(
     """
     <style>
@@ -2526,7 +2556,6 @@ with st.container():
 
     _previous = wizard.previous_step(_step)
     _next = wizard.next_step(_step)
-    _confirm_key = f"wiz_confirm_leave_{quotation_id}"
 
     _state = {
         "header": header,
@@ -2549,8 +2578,10 @@ with st.container():
     _may_have_unsaved = editable and _step in _STEPS_THAT_SAVE
 
     if st.session_state.get(_confirm_key):
+        _target = st.session_state.get(_confirm_target_key) or _previous
         st.warning(
-            "Leaving **" + wizard.STEP_LABELS[_step] + "** without saving. "
+            f"Leaving **{wizard.STEP_LABELS[_step]}** for "
+            f"**{wizard.STEP_LABELS.get(_target, _target)}** without saving. "
             "Anything typed since the last save will be lost."
         )
         _discard_col, _stay_col, _ = st.columns([1, 1, 3])
@@ -2558,12 +2589,16 @@ with st.container():
             if st.button("Discard and go back", use_container_width=True,
                          key=f"wiz_discard_{quotation_id}"):
                 st.session_state.pop(_confirm_key, None)
-                st.session_state[f"{_step_key}_pending"] = _previous
+                st.session_state.pop(_confirm_target_key, None)
+                # Nothing is written on this path. The pending edits are simply
+                # never submitted, so the row keeps the values it already had.
+                st.session_state[f"{_step_key}_pending"] = _target
                 st.rerun()
         with _stay_col:
             if st.button("Stay here", type="primary", use_container_width=True,
                          key=f"wiz_stay_{quotation_id}"):
                 st.session_state.pop(_confirm_key, None)
+                st.session_state.pop(_confirm_target_key, None)
                 st.rerun()
     else:
         _back_col, _spacer, _status_col, _action_col = st.columns([1, 3, 2, 2])
@@ -2575,6 +2610,7 @@ with st.container():
             ):
                 if _may_have_unsaved:
                     st.session_state[_confirm_key] = True
+                    st.session_state[_confirm_target_key] = _previous
                 else:
                     st.session_state[f"{_step_key}_pending"] = _previous
                 st.rerun()

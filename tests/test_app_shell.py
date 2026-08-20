@@ -650,6 +650,83 @@ class TestQuotationPages:
         assert "Save & Continue →" not in enabled
         assert "Save details" not in enabled
 
+    def test_clicking_the_strip_is_guarded_like_the_back_button(
+        self, session, priced_quotation,
+    ):
+        """Direct navigation leaves a step just as much as Back does.
+
+        The strip sits beside the footer; letting it walk away from unsaved
+        edits without a word would be the worse of the two, because it looks
+        like navigation rather than a decision.
+        """
+        from modules import wizard
+
+        quotation_id = priced_quotation["quotation_id"]
+        step_key = wizard.step_state_key(quotation_id)
+
+        app = self._open_step(session, priced_quotation, "shipping")
+        assert not app.exception, app.exception
+
+        # Click the strip through to Terms, as a person would.
+        app.session_state[step_key] = "terms"
+        app.run()
+
+        assert app.session_state[step_key] == "shipping", "left without asking"
+        assert any("without saving" in str(w.value) for w in app.warning)
+
+        [b for b in app.button if b.label == "Discard and go back"][0].click().run()
+        assert app.session_state[step_key] == "terms", "did not honour the target"
+
+    def test_discarding_writes_nothing(self, session, priced_quotation):
+        """The pending edits are never submitted, so the row keeps what it had."""
+        from modules import wizard
+        from modules.models import Quotation
+
+        quotation_id = priced_quotation["quotation_id"]
+        before = session.get(Quotation, quotation_id).project_name
+
+        app = self._open_step(session, priced_quotation, "details")
+        [t for t in app.text_input if t.label == "Project"][0].set_value("Discarded")
+        [b for b in app.button if b.label == "← Back"][0].click().run()
+        [b for b in app.button if b.label == "Discard and go back"][0].click().run()
+
+        session.expire_all()
+        assert session.get(Quotation, quotation_id).project_name == before
+
+    def test_save_only_stays_on_the_step(self, session, priced_quotation):
+        """Save details saves and stays; only Save & Continue moves."""
+        from modules import wizard
+        from modules.models import Quotation
+
+        quotation_id = priced_quotation["quotation_id"]
+        app = self._open_step(session, priced_quotation, "details")
+        [t for t in app.text_input if t.label == "Project"][0].set_value("Stay Put")
+        [b for b in app.button if b.label == "Save details"][0].click().run()
+        assert not app.exception, app.exception
+
+        session.expire_all()
+        assert session.get(Quotation, quotation_id).project_name == "Stay Put"
+        assert app.session_state[wizard.step_state_key(quotation_id)] == "details"
+
+    @pytest.mark.parametrize("step", ["lines", "charges", "terms"])
+    def test_steps_that_write_as_they_go_offer_next(
+        self, session, priced_quotation, step,
+    ):
+        """Their rows are written as each is added, so there is no pending save
+        for a button to promise."""
+        app = self._open_step(session, priced_quotation, step)
+        assert not app.exception, app.exception
+        labels = [b.label for b in app.button]
+        assert "Next →" in labels
+        assert not any("Save & Continue" in label for label in labels)
+
+    def test_review_carries_no_duplicate_navigation(self, session, priced_quotation):
+        app = self._open_step(session, priced_quotation, "review")
+        assert not app.exception, app.exception
+        labels = [b.label for b in app.button]
+        assert "Next →" not in labels
+        assert not any("Save & Continue" in label for label in labels)
+
     def test_an_existing_quotation_opens_with_its_totals(
         self, session, priced_quotation
     ):
