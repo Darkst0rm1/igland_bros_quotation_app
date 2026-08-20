@@ -455,14 +455,31 @@ class TestQuotationPages:
         assert "Add a product" in on_lines
         assert "Add a product" not in on_details
 
-    def test_the_footer_offers_back_and_continue(self, session, priced_quotation):
+    def test_a_step_with_pending_edits_saves_from_inside_its_form(
+        self, session, priced_quotation,
+    ):
+        """Save & Continue is a form submit, not a footer button.
+
+        A button outside an st.form cannot submit it, so the only honest place
+        for a saving button is inside the form holding the fields.
+        """
+        app = self._open_step(session, priced_quotation, "details")
+        assert not app.exception, app.exception
+        submits = [b.label for b in app.button]
+        assert "Save & Continue →" in submits
+        assert "Save details" in submits
+
+    def test_a_step_with_nothing_pending_offers_plain_next(
+        self, session, priced_quotation,
+    ):
+        """Lines are written as each row is added, so there is no pending save
+        to promise — the footer says Next, not Save & Continue."""
         app = self._open_step(session, priced_quotation, "lines")
         assert not app.exception, app.exception
         labels = [b.label for b in app.button]
         assert "← Back" in labels
-        # "Continue", not "Save & Continue": the footer does not save yet, and
-        # the label is not allowed to promise more than the button does.
-        assert any("Continue" in label for label in labels)
+        assert "Next →" in labels
+        assert not any("Save & Continue" in label for label in labels)
 
     def test_back_is_disabled_on_the_first_step(self, session, priced_quotation):
         """There is nowhere behind Details."""
@@ -477,6 +494,7 @@ class TestQuotationPages:
         app = self._open_step(session, priced_quotation, "review")
         assert not app.exception, app.exception
         assert not any("Continue" in b.label for b in app.button)
+        assert not any(b.label == "Next →" for b in app.button)
 
     def test_continue_moves_to_the_next_step(self, session, priced_quotation):
         from modules import wizard
@@ -485,13 +503,30 @@ class TestQuotationPages:
         app = self._open_step(session, priced_quotation, "details")
         assert not app.exception, app.exception
 
-        button = [b for b in app.button if "Continue" in b.label]
-        assert button, "no continue button on the details step"
+        button = [b for b in app.button if b.label == "Save & Continue →"]
+        assert button, "no Save & Continue on the details step"
         button[0].click().run()
 
         assert app.session_state[wizard.step_state_key(quotation_id)] == "lines"
 
-    def test_back_moves_to_the_previous_step(self, session, priced_quotation):
+    def test_back_moves_straight_off_a_step_with_nothing_to_lose(
+        self, session, priced_quotation,
+    ):
+        from modules import wizard
+
+        quotation_id = priced_quotation["quotation_id"]
+        app = self._open_step(session, priced_quotation, "charges")
+        assert not app.exception, app.exception
+
+        [b for b in app.button if b.label == "← Back"][0].click().run()
+        assert app.session_state[wizard.step_state_key(quotation_id)] == "shipping"
+
+    def test_back_off_a_form_step_asks_before_discarding(
+        self, session, priced_quotation,
+    ):
+        """Streamlit does not expose a form's contents until it is submitted, so
+        the page cannot know whether anything is dirty. It asks rather than
+        guessing, and does not move until answered."""
         from modules import wizard
 
         quotation_id = priced_quotation["quotation_id"]
@@ -499,13 +534,121 @@ class TestQuotationPages:
         assert not app.exception, app.exception
 
         [b for b in app.button if b.label == "← Back"][0].click().run()
+        assert app.session_state[wizard.step_state_key(quotation_id)] == "shipping"
+        assert any("without saving" in str(w.value) for w in app.warning)
+
+        [b for b in app.button if b.label == "Discard and go back"][0].click().run()
         assert app.session_state[wizard.step_state_key(quotation_id)] == "lines"
+
+    def test_staying_put_keeps_the_step(self, session, priced_quotation):
+        from modules import wizard
+
+        quotation_id = priced_quotation["quotation_id"]
+        app = self._open_step(session, priced_quotation, "shipping")
+        [b for b in app.button if b.label == "← Back"][0].click().run()
+        [b for b in app.button if b.label == "Stay here"][0].click().run()
+        assert app.session_state[wizard.step_state_key(quotation_id)] == "shipping"
 
     def test_a_stale_step_key_does_not_break_the_page(self, session, priced_quotation):
         """A renamed step must land on Details, not raise on a page the user
         did nothing wrong to reach."""
         app = self._open_step(session, priced_quotation, "a_step_that_was_renamed")
         assert not app.exception, app.exception
+
+    # --- Save & Continue actually saves ------------------------------------ #
+
+    def test_save_and_continue_commits_before_it_advances(
+        self, session, priced_quotation,
+    ):
+        """The assertion that matters: the value is in the database.
+
+        Session state surviving a rerun proves nothing — the point of Save &
+        Continue is that the work is durable before the employee is moved off
+        the screen where they did it. This reads the row back through a fresh
+        query rather than trusting the page.
+        """
+        from modules import wizard
+        from modules.models import Quotation
+
+        quotation_id = priced_quotation["quotation_id"]
+        app = self._open_step(session, priced_quotation, "details")
+        assert not app.exception, app.exception
+
+        project = [t for t in app.text_input if t.label == "Project"][0]
+        project.set_value("Wolf Creek Retrofit")
+
+        [b for b in app.button if b.label == "Save & Continue →"][0].click().run()
+        assert not app.exception, app.exception
+
+        session.expire_all()
+        stored = session.get(Quotation, quotation_id)
+        assert stored.project_name == "Wolf Creek Retrofit"
+        assert app.session_state[wizard.step_state_key(quotation_id)] == "lines"
+
+    def test_saved_values_come_back_from_the_database_on_reopen(
+        self, session, priced_quotation,
+    ):
+        """Reopening is a fresh process with empty session state. Anything that
+        comes back came from the row."""
+        from modules.models import Quotation
+
+        quotation_id = priced_quotation["quotation_id"]
+        app = self._open_step(session, priced_quotation, "details")
+        [t for t in app.text_input if t.label == "Brand"][0].set_value("Northwind")
+        [b for b in app.button if b.label == "Save & Continue →"][0].click().run()
+        assert not app.exception, app.exception
+
+        session.expire_all()
+        assert session.get(Quotation, quotation_id).brand == "Northwind"
+
+        reopened = self._open_step(session, priced_quotation, "details")
+        assert not reopened.exception, reopened.exception
+        brand = [t for t in reopened.text_input if t.label == "Brand"][0]
+        assert brand.value == "Northwind"
+
+    def test_a_failed_validation_neither_saves_nor_advances(
+        self, session, priced_quotation,
+    ):
+        """A quotation that expires before it is issued must not be written,
+        and the employee must not be moved away from the mistake."""
+        import datetime as dt
+
+        from modules import wizard
+        from modules.models import Quotation
+
+        quotation_id = priced_quotation["quotation_id"]
+        before = session.get(Quotation, quotation_id).project_name
+
+        app = self._open_step(session, priced_quotation, "details")
+        [t for t in app.text_input if t.label == "Project"][0].set_value("Should Not Save")
+        [d for d in app.date_input if d.label == "Valid until"][0].set_value(
+            dt.date(2026, 1, 1)
+        )
+        [b for b in app.button if b.label == "Save & Continue →"][0].click().run()
+        assert not app.exception, app.exception
+
+        session.expire_all()
+        assert session.get(Quotation, quotation_id).project_name == before
+        assert app.session_state[wizard.step_state_key(quotation_id)] == "details"
+        assert any("before" in str(e.value).lower() for e in app.error)
+
+    def test_a_locked_quotation_offers_no_saving_control(
+        self, session, priced_quotation, make_user,
+    ):
+        """Navigation must never be what makes a locked quotation editable."""
+        from modules.constants import QuotationStatus
+        from modules.models import Quotation
+
+        quotation = session.get(Quotation, priced_quotation["quotation_id"])
+        quotation.status = QuotationStatus.ACCEPTED
+        quotation.is_locked = True
+        session.commit()
+
+        app = self._open_step(session, priced_quotation, "details")
+        assert not app.exception, app.exception
+        enabled = [b.label for b in app.button if not b.disabled]
+        assert "Save & Continue →" not in enabled
+        assert "Save details" not in enabled
 
     def test_an_existing_quotation_opens_with_its_totals(
         self, session, priced_quotation

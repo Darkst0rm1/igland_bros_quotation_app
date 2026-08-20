@@ -210,6 +210,7 @@ with session_scope() as db:
         "quote_date": quotation.quote_date,
         "valid_until": quotation.valid_until,
         "customer": quotation.customer_name_snapshot,
+        "customer_id": quotation.customer_id,
         "contact_name": quotation.contact_name or "",
         "contact_email": quotation.contact_email or "",
         "contact_phone": quotation.contact_phone or "",
@@ -475,16 +476,39 @@ st.segmented_control(
 _step = wizard.resolve_step(st.session_state.get(_step_key))
 
 
-def _save_header(**fields) -> None:
+def _advance_from(step: str) -> None:
+    """Queue the move to the next step. Only ever called after a commit."""
+    nxt = wizard.next_step(step)
+    if nxt is not None:
+        st.session_state[f"{wizard.step_state_key(quotation_id)}_pending"] = nxt
+
+
+def _save_header(*, advance: bool = False, **fields) -> None:
+    """Save the header through the one service that owns it, then maybe move on.
+
+    ``session_scope`` commits on a clean exit and rolls back on an exception, so
+    reaching the ``else`` branch is the transaction having succeeded. That is
+    what "Saved" is allowed to mean, and why the toast and the step change both
+    live there: a failed save must leave the employee exactly where they were,
+    looking at what they typed, with the reason on screen.
+
+    Nothing is re-validated or re-permissioned here. ``update_header`` already
+    owns the rules and writes the audit entry; a second copy of them on this
+    page would be a second place for them to fall out of step.
+    """
     try:
         with session_scope() as db:
             quotation_service.update_header(
                 db, user, db.get(Quotation, quotation_id), **fields
             )
     except (QuotationError, PermissionDenied) as exc:
+        # No rerun: the script continues, the form redraws holding what was
+        # typed, and this sits above it.
         st.error(str(exc))
     else:
         st.toast("Saved", icon="✅")
+        if advance:
+            _advance_from("details")
         st.rerun()
 
 
@@ -562,12 +586,40 @@ if _step == "details":
                 value=header["internal_notes"], disabled=not editable,
             )
 
-        saved = st.form_submit_button(
-            "Save details", type="primary", disabled=not editable
-        )
+        # Two submits on one form. Streamlit returns True for whichever was
+        # pressed, so "Save & Continue" is the same save as "Save details" plus
+        # a step change — not a second write path with its own rules to drift.
+        _save_col, _continue_col = st.columns([1, 1])
+        with _save_col:
+            saved = st.form_submit_button(
+                "Save details", disabled=not editable, use_container_width=True,
+            )
+        with _continue_col:
+            saved_and_continue = st.form_submit_button(
+                "Save & Continue →", type="primary", disabled=not editable,
+                use_container_width=True,
+            )
 
-    if saved:
+    # Checked against what was just typed, not against what is stored: the
+    # stored row is still the previous version at this point, and validating it
+    # would pass a quotation the employee has just made invalid.
+    _submitted = {
+        "header": {
+            "customer_id": header["customer_id"],
+            "currency": header["currency"],
+            "quote_date": quote_date,
+            "valid_until": valid_until,
+        }
+    }
+    _details_problems = (
+        wizard.validate("details", _submitted) if (saved or saved_and_continue) else []
+    )
+    for _problem in _details_problems:
+        st.error(_problem)
+
+    if (saved or saved_and_continue) and not _details_problems:
         _save_header(
+            advance=bool(saved_and_continue),
             project_name=project_name or None,
             brand=brand or None,
             distributor=distributor or None,
@@ -1515,9 +1567,17 @@ if _step == "shipping":
                     "charged for freight is the line in the totals."
                 ),
             )
-            saved_shipment = st.form_submit_button("Save shipping details", type="primary")
+            _ship_save_col, _ship_cont_col = st.columns([1, 1])
+            with _ship_save_col:
+                saved_shipment = st.form_submit_button(
+                    "Save shipping details", use_container_width=True,
+                )
+            with _ship_cont_col:
+                saved_shipment_continue = st.form_submit_button(
+                    "Save & Continue →", type="primary", use_container_width=True,
+                )
 
-        if saved_shipment:
+        if saved_shipment or saved_shipment_continue:
             try:
                 changes = {
                     "incoterm": incoterm,
@@ -1539,7 +1599,12 @@ if _step == "shipping":
             except (ShippingError, QuotationError, PermissionDenied) as exc:
                 st.error(str(exc))
             else:
+                # Inside the else: the transaction has committed. A step
+                # change queued before this point would move someone off a
+                # screen whose save had actually failed.
                 st.toast("Shipping details saved", icon="✅")
+                if saved_shipment_continue:
+                    _advance_from("shipping")
                 st.rerun()
 
         if shipment["freight_method"] is FreightMethod.ADDED_SEPARATELY:
@@ -2428,19 +2493,20 @@ if _step == "tracking":
 # --------------------------------------------------------------------------- #
 # Step footer
 # --------------------------------------------------------------------------- #
-# Rendered last so it sits at the bottom of the document, and pinned so it stays
-# reachable without scrolling a long Lines or Shipping step to its end.
+# Back, and the state of the current step. Save & Continue is deliberately NOT
+# here: it lives inside each step's own st.form, because a button outside a form
+# cannot submit it, and moving the fields out of their forms to suit the footer
+# would mean every keystroke re-running the page.
 #
-# The footer never writes to the database itself. Every save still goes through
-# the step's own form and quotation_service, which is what keeps locking,
-# approval and audit exactly where they already are — a second write path would
-# be a second place for those rules to be forgotten.
+# So the footer carries what can honestly live outside a form — going back,
+# going forward when there is nothing to save, and saying why a step is blocked.
+# It never writes to the database.
+
+_STEPS_THAT_SAVE = {"details", "shipping"}
 
 st.markdown(
     """
     <style>
-      /* Clears Streamlit's own bottom padding so the bar does not float above
-         a gap, and leaves room so the last widget is never covered by it. */
       section.main > div.block-container { padding-bottom: 6.5rem; }
       div[data-testid="stVerticalBlock"] > div:has(> div.quotation-step-footer) {
           position: sticky;
@@ -2460,7 +2526,7 @@ with st.container():
 
     _previous = wizard.previous_step(_step)
     _next = wizard.next_step(_step)
-    _saving = st.session_state.get(wizard.saving_state_key(quotation_id), False)
+    _confirm_key = f"wiz_confirm_leave_{quotation_id}"
 
     _state = {
         "header": header,
@@ -2468,9 +2534,6 @@ with st.container():
         "incomplete_line_count": st.session_state.get(
             f"incomplete_lines_{quotation_id}", 0
         ),
-        # Only ADDED_SEPARATELY bills the customer for freight; INCLUDED and
-        # internal freight never become a charge. Containers only have to exist
-        # when there is freight to price against them.
         "freight_charged": (
             shipment is not None
             and shipment["freight_method"] is FreightMethod.ADDED_SEPARATELY
@@ -2479,55 +2542,65 @@ with st.container():
     }
     _problems = wizard.validate(_step, _state)
 
-    _back_col, _spacer, _status_col, _action_col = st.columns([1, 3, 2, 2])
+    # A step whose fields sit in a form has edits this page cannot see: Streamlit
+    # does not surface form contents until the form is submitted, so there is no
+    # honest way to ask "is anything dirty". Rather than guess, going back from
+    # such a step asks first. On steps with nothing pending, it does not.
+    _may_have_unsaved = editable and _step in _STEPS_THAT_SAVE
 
-    with _back_col:
-        if st.button(
-            "← Back", disabled=_previous is None, use_container_width=True,
-            key=f"wiz_back_{quotation_id}",
-        ):
-            st.session_state[f"{_step_key}_pending"] = _previous
-            st.rerun()
-
-    with _status_col:
-        if _problems:
-            st.caption(f"⚠️ {_problems[0]}")
-        elif not editable:
-            st.caption("🔒 Locked — read only")
-
-    with _action_col:
-        if wizard.is_last(_step):
-            # The send action already exists on the Review step, with its own
-            # confirmations. Duplicating it here would be a second way to send.
-            st.caption("Use **Send to customer** above.")
-        elif not editable:
-            if st.button(
-                "Next →", disabled=_next is None, use_container_width=True,
-                key=f"wiz_next_ro_{quotation_id}",
-            ):
-                st.session_state[f"{_step_key}_pending"] = _next
+    if st.session_state.get(_confirm_key):
+        st.warning(
+            "Leaving **" + wizard.STEP_LABELS[_step] + "** without saving. "
+            "Anything typed since the last save will be lost."
+        )
+        _discard_col, _stay_col, _ = st.columns([1, 1, 3])
+        with _discard_col:
+            if st.button("Discard and go back", use_container_width=True,
+                         key=f"wiz_discard_{quotation_id}"):
+                st.session_state.pop(_confirm_key, None)
+                st.session_state[f"{_step_key}_pending"] = _previous
                 st.rerun()
-        else:
-            # Labelled "Continue", not "Save & Continue", and it raises no
-            # "Saved" toast — because it does not yet save. Each step's fields
-            # live inside their own st.form, and a button outside a form cannot
-            # submit it; until those fields move out of their forms, this
-            # advances the step and nothing more. Claiming a save here would
-            # teach people their work is safe at exactly the moment it is not,
-            # which is worse than the button being honestly incomplete.
+        with _stay_col:
+            if st.button("Stay here", type="primary", use_container_width=True,
+                         key=f"wiz_stay_{quotation_id}"):
+                st.session_state.pop(_confirm_key, None)
+                st.rerun()
+    else:
+        _back_col, _spacer, _status_col, _action_col = st.columns([1, 3, 2, 2])
+
+        with _back_col:
             if st.button(
-                "Continue →",
-                type="primary",
-                use_container_width=True,
-                disabled=bool(_problems) or _saving or _next is None,
-                key=f"wiz_continue_{quotation_id}",
+                "← Back", disabled=_previous is None, use_container_width=True,
+                key=f"wiz_back_{quotation_id}",
             ):
-                # Held across the rerun the click causes, so a second click
-                # while the first is still in flight finds the button disabled.
-                st.session_state[wizard.saving_state_key(quotation_id)] = True
-                st.session_state[f"{_step_key}_pending"] = _next
+                if _may_have_unsaved:
+                    st.session_state[_confirm_key] = True
+                else:
+                    st.session_state[f"{_step_key}_pending"] = _previous
                 st.rerun()
 
-# Cleared once the next run has drawn the button again.
-if st.session_state.get(wizard.saving_state_key(quotation_id)):
-    st.session_state[wizard.saving_state_key(quotation_id)] = False
+        with _status_col:
+            if _problems:
+                st.caption(f"⚠️ {_problems[0]}")
+            elif not editable:
+                st.caption("🔒 Locked — read only")
+            elif _step in _STEPS_THAT_SAVE:
+                st.caption("Use **Save & Continue** above.")
+
+        with _action_col:
+            if wizard.is_last(_step):
+                # Review already carries the send action and its confirmations.
+                st.caption("Use **Send to customer** above.")
+            elif not editable or _step not in _STEPS_THAT_SAVE:
+                # Nothing on this step is pending a save: lines, charges and
+                # terms are written as each row is added, and a locked
+                # quotation has nothing to write at all. Moving on is honest.
+                if st.button(
+                    "Next →",
+                    type="primary" if editable else "secondary",
+                    disabled=_next is None or bool(_problems),
+                    use_container_width=True,
+                    key=f"wiz_next_{quotation_id}",
+                ):
+                    st.session_state[f"{_step_key}_pending"] = _next
+                    st.rerun()
