@@ -35,8 +35,18 @@ down_revision = "e5a2c8b71d64"
 branch_labels = None
 depends_on = None
 
+# native_enum=False, matching models._enum and every other enum column in this
+# schema. Without it this created a real PostgreSQL enum type while the ORM
+# treated the column as a string — a disagreement PostgreSQL tolerates for
+# single-row inserts and rejects for multi-row ones. a7c41e2f9b83 converts the
+# databases that already ran this; the change here is so that a database built
+# from scratch never grows the type in the first place.
+#
+# .create() and .drop() below become no-ops for a non-native enum, which is
+# what should always have happened here.
 _STATUS = sa.Enum(
-    "NONE", "PENDING", "APPROVED", "REJECTED", name="waiverstatus"
+    "NONE", "PENDING", "APPROVED", "REJECTED", name="waiverstatus",
+    native_enum=False, length=40,
 )
 
 
